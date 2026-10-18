@@ -1,4 +1,5 @@
 mod assets;
+mod online;
 
 use assets::Assets;
 use bomberpengu::ai::Ai;
@@ -30,6 +31,7 @@ enum Screen {
     Title,
     Playing(Game),
     After { mode: Mode, outcome: Outcome },
+    Online(Box<online::Online>),
 }
 
 fn window_conf() -> Conf {
@@ -50,6 +52,14 @@ impl Game {
         };
         assets.play(&assets.sounds.music);
         Self { m: Match::new(seed), mode, ai }
+    }
+
+    fn names(&self) -> [&'static str; 2] {
+        match self.mode {
+            Mode::VsAi => ["Spieler", "Computer"],
+            Mode::TwoPlayers => ["Spieler 1", "Spieler 2"],
+            Mode::Demo => ["Computer 1", "Computer 2"],
+        }
     }
 
     fn tick(&mut self, assets: &Assets) {
@@ -83,21 +93,24 @@ impl Game {
             Mode::Demo => 0,
         };
         for (pi, (keys, bomb)) in maps.iter().enumerate().take(humans) {
-            let p = &mut self.m.world.players[pi];
-            let dirs = [Dir::Left, Dir::Up, Dir::Right, Dir::Down];
-            for (k, d) in keys.iter().zip(dirs) {
-                if is_key_pressed(*k) {
-                    p.key_down(d);
-                }
-            }
-            if is_key_pressed(*bomb) {
-                p.key_space_down();
-            }
-            let any_released = keys.iter().any(|k| is_key_released(*k)) || is_key_released(*bomb);
-            if any_released {
-                p.keys_released(keys.map(is_key_down), is_key_down(*bomb));
-            }
+            apply_keys(&mut self.m.world.players[pi], *keys, *bomb);
         }
+    }
+}
+
+/// Keyboard -> the original `onKeyDown/onKeyUp` handlers for one penguin.
+fn apply_keys(p: &mut Player, keys: [KeyCode; 4], bomb: KeyCode) {
+    let dirs = [Dir::Left, Dir::Up, Dir::Right, Dir::Down];
+    for (k, d) in keys.iter().zip(dirs) {
+        if is_key_pressed(*k) {
+            p.key_down(d);
+        }
+    }
+    if is_key_pressed(bomb) {
+        p.key_space_down();
+    }
+    if keys.iter().any(|k| is_key_released(*k)) || is_key_released(bomb) {
+        p.keys_released(keys.map(is_key_down), is_key_down(bomb));
     }
 }
 
@@ -125,13 +138,8 @@ fn draw_player(a: &Assets, p: &Player) {
     strip.draw_ex(frame, p.x as f32, p.y as f32, p.facing_left, 0.0);
 }
 
-fn draw_hud(a: &Assets, g: &Game) {
-    let names = match g.mode {
-        Mode::VsAi => ["Spieler", "Computer"],
-        Mode::TwoPlayers => ["Spieler 1", "Spieler 2"],
-        Mode::Demo => ["Computer 1", "Computer 2"],
-    };
-    for (i, p) in g.m.world.players.iter().enumerate() {
+fn draw_hud(a: &Assets, w: &World, names: [&str; 2], hint: &str) {
+    for (i, p) in w.players.iter().enumerate() {
         let y0 = if i == 0 { 48.0 } else { 213.0 };
         text(names[i], 8.0, y0, 18.0, INK);
         text(&format!("Bomben  {}", p.num_bombs), 12.0, y0 + 36.0, 16.0, INK);
@@ -141,7 +149,7 @@ fn draw_hud(a: &Assets, g: &Game) {
     }
     // SoundButton: frame 1 = on, frame 2 = off, placed at (528.2, 470.4) scaled 0.8
     a.sound_btn.draw(if a.sound_on { 0 } else { 1 }, 528.2, 470.4);
-    text("Esc: Menü", 8.0, 632.0, 16.0, INK);
+    text(hint, 8.0, 632.0, 16.0, INK);
 }
 
 enum Fx<'a> {
@@ -149,8 +157,7 @@ enum Fx<'a> {
     Flame(&'a bomberpengu::world::Flame),
 }
 
-fn draw_game(a: &Assets, g: &Game) {
-    let w: &World = &g.m.world;
+fn draw_game(a: &Assets, w: &World, names: [&str; 2], hint: &str) {
     draw_texture(&a.bg_game, 0.0, 0.0, WHITE);
     let (bx, by) = (BOARD_X as f32, BOARD_Y as f32);
     for cy in 0..ROWS {
@@ -193,7 +200,7 @@ fn draw_game(a: &Assets, g: &Game) {
     for p in &w.players {
         draw_player(a, p);
     }
-    draw_hud(a, g);
+    draw_hud(a, w, names, hint);
 }
 
 fn button_rect(a: &assets::Strip, x: f32, y: f32) -> Rect {
@@ -236,6 +243,7 @@ fn draw_title(a: &Assets) {
     a.start.draw(0, START_POS.0, START_POS.1);
     text("Enter / Klick: gegen Computer", 330.0, 500.0, 20.0, INK);
     text("2: zwei Spieler an einer Tastatur", 330.0, 524.0, 20.0, INK);
+    text("O: online spielen (Server noetig)", 330.0, 548.0, 20.0, INK);
     a.sound_btn.draw(if a.sound_on { 0 } else { 1 }, 528.2, 470.4);
 }
 
@@ -276,6 +284,13 @@ struct Cli {
     shot: Option<String>,
     shot_tick: u32,
     screen: Option<String>,
+    online: bool,
+    autoconnect: bool,
+    challenge: Option<String>,
+    accept: bool,
+    shot_frames: u32,
+    name: String,
+    server: String,
 }
 
 fn cli() -> Cli {
@@ -292,6 +307,14 @@ fn cli() -> Cli {
         shot: val("--shot"),
         shot_tick: val("--shot-tick").and_then(|s| s.parse().ok()).unwrap_or(0),
         screen: val("--screen"),
+        online: args.iter().any(|a| a == "--online"),
+        autoconnect: args.iter().any(|a| a == "--connect"),
+        challenge: val("--challenge"),
+        accept: args.iter().any(|a| a == "--accept"),
+        shot_frames: val("--shot-frames").and_then(|s| s.parse().ok()).unwrap_or(2),
+        // original: "Gast" + Math.round(Math.random() * 100000) when no user name is given
+        name: val("--name").unwrap_or_else(|| format!("Gast{}", rand::gen_range(0, 100_001))),
+        server: val("--server").unwrap_or_else(|| format!("127.0.0.1:{}", bomberpengu::server::DEFAULT_PORT)),
     }
 }
 
@@ -301,6 +324,15 @@ async fn main() {
     let mut assets = Assets::load().await;
     let cli = cli();
     let mut screen = match (cli.mode, cli.screen.as_deref()) {
+        _ if cli.online => {
+            let mut o = online::Online::new(&cli.name, &cli.server);
+            o.auto_challenge = cli.challenge.clone();
+            o.auto_accept = cli.accept;
+            if cli.autoconnect {
+                o.connect();
+            }
+            Screen::Online(Box::new(o))
+        }
         (_, Some("title")) => Screen::Title,
         (_, Some("after")) => Screen::After { mode: Mode::VsAi, outcome: Outcome::Win(0) },
         (Some(mode), _) => Screen::Playing(Game::new(mode, cli.seed.unwrap_or_else(new_seed), &assets)),
@@ -327,6 +359,8 @@ async fn main() {
                     next = Some(Screen::Playing(Game::new(Mode::VsAi, new_seed(), &assets)));
                 } else if is_key_pressed(KeyCode::Key2) {
                     next = Some(Screen::Playing(Game::new(Mode::TwoPlayers, new_seed(), &assets)));
+                } else if is_key_pressed(KeyCode::O) {
+                    next = Some(Screen::Online(Box::new(online::Online::new(&cli.name, &cli.server))));
                 } else if is_key_pressed(KeyCode::Escape) {
                     return;
                 }
@@ -347,7 +381,7 @@ async fn main() {
                     next = Some(Screen::Title);
                 }
                 clear_background(GRAY);
-                draw_game(&assets, g);
+                draw_game(&assets, &g.m.world, g.names(), "Esc: Menü");
             }
             Screen::After { mode, outcome } => {
                 let mode = *mode;
@@ -359,6 +393,12 @@ async fn main() {
                 clear_background(GRAY);
                 draw_after(&assets, mode, *outcome);
             }
+            Screen::Online(o) => {
+                clear_background(GRAY);
+                if !o.frame(&assets, get_frame_time() as f64) {
+                    next = Some(Screen::Title);
+                }
+            }
         }
         if let Some(n) = next {
             screen = n;
@@ -366,7 +406,7 @@ async fn main() {
         }
         frames += 1;
         if let Some(path) = &cli.shot {
-            if frames == 2 {
+            if frames == cli.shot_frames {
                 get_screen_data().export_png(path);
                 return;
             }

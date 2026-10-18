@@ -221,6 +221,34 @@ impl Player {
         self.set_anim(Anim::Dead);
     }
 
+    /// `MyPlayer.remoteCommand`: adopt the position and the `[left, up, right, down]` key state sent by the other client.
+    pub fn remote_command(&mut self, keys: [bool; 4], x: f64, y: f64) {
+        let [l, u, r, d] = keys;
+        self.x = x;
+        self.y = y;
+        self.set_flags(l, u, r, d);
+        if l {
+            self.facing_left = true;
+        }
+        if r {
+            self.facing_left = false;
+        }
+        if u {
+            self.set_anim(Anim::Up);
+        } else if d {
+            self.set_anim(Anim::Down);
+        } else if l || r {
+            self.set_anim(Anim::Go);
+        } else {
+            self.set_anim(Anim::Stand);
+        }
+    }
+
+    /// Key state as sent in the `c` attribute of message 12.
+    pub fn key_state(&self) -> [bool; 4] {
+        [self.left, self.up, self.right, self.down]
+    }
+
     /// `getDxDy`: distance per update, capped at 20 px.
     pub fn step_distance(&self, diff_ms: f64) -> f64 {
         (self.speed * diff_ms).min(20.0)

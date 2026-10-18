@@ -2,7 +2,8 @@
 name = "bomberpengu"
 version = "0.1.0"
 edition = "2021"
-description = "Native Rust rewrite of the Flash game Bomber Pengu (local play only)"
+description = "Native Rust rewrite of the Flash game Bomber Pengu"
+default-run = "bomberpengu"
 
 [lib]
 name = "bomberpengu"
@@ -11,6 +12,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "bomberpengu"
 path = "src/main.rs"
+
+[[bin]]
+name = "bomberpengu-server"
+path = "src/server_main.rs"
 
 [dependencies]
 macroquad = { version = "0.4", default-features = true, features = ["audio"] }

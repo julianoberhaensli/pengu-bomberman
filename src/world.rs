@@ -30,6 +30,10 @@ pub struct Bomb {
     pub exploded: bool,
     /// Stone that was in the cell the bomb currently occupies (restored when it moves on).
     pub old: Option<Cell>,
+    /// `moveId`: assigned on the first kick, shared with the other client.
+    pub id: Option<i64>,
+    /// Kicked or stopped by the remote player: its detonation is announced by the other client, not by the fuse.
+    pub remote_kicked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +56,17 @@ pub enum Event {
     Kick,
 }
 
+/// Something the local player did that the other client has to be told about (only produced when `World::local` is set).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Outgoing {
+    Pickup { cx: i32, cy: i32 },
+    BombPlaced { cx: i32, cy: i32 },
+    Kick { cx: i32, cy: i32, id: i64, dx: f64, dy: f64, t: i64 },
+    Stop { cx: i32, cy: i32, id: i64, t: i64 },
+    Detonate { cx: i32, cy: i32, id: i64 },
+    Die,
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     pub cells: Cells,
@@ -65,6 +80,12 @@ pub struct World {
     pub locked: bool,
     lock_now: i64,
     next_uid: u32,
+    /// Online play: index of the player this client controls (`Game.thisPlayer`). Pick-ups, kicks, deaths and bomb
+    /// placement of the other player only arrive as messages. `None` = local game where the world decides everything.
+    pub local: Option<usize>,
+    pub outgoing: Vec<Outgoing>,
+    /// `BombManager.nextId`: 5000 for player 1, 10000 for player 2 so that ids never collide.
+    pub next_bomb_id: i64,
 }
 
 impl World {
@@ -84,6 +105,20 @@ impl World {
             locked: false,
             lock_now: -1,
             next_uid: 1,
+            local: None,
+            outgoing: Vec::new(),
+            next_bomb_id: 5000,
+        }
+    }
+
+    /// Whether this world decides the events of player `pi` (always in a local game, only for `local` online).
+    fn authority(&self, pi: usize) -> bool {
+        self.local.map_or(true, |l| l == pi)
+    }
+
+    fn notify(&mut self, o: Outgoing) {
+        if self.local.is_some() {
+            self.outgoing.push(o);
         }
     }
 
@@ -149,7 +184,7 @@ impl World {
 
     /// `Game.thisPlayerDie`: ignored once the game is locked, except for deaths in the very same tick (draw).
     pub fn kill(&mut self, pi: usize) {
-        if self.players[pi].dead {
+        if self.players[pi].dead || !self.authority(pi) {
             return;
         }
         if self.locked && self.lock_now != self.now {
@@ -160,6 +195,7 @@ impl World {
             self.lock_now = self.now;
         }
         self.players[pi].die();
+        self.notify(Outgoing::Die);
     }
 
     // ---- players ---------------------------------------------------------------------------------------------
@@ -188,6 +224,9 @@ impl World {
     }
 
     fn pick_up(&mut self, pi: usize) {
+        if !self.authority(pi) {
+            return;
+        }
         let (x, y) = (self.players[pi].x, self.players[pi].y);
         let Some((cx, cy, cell)) = self.stone_at_px(x, y) else { return };
         if !cell.is_item() {
@@ -209,10 +248,11 @@ impl World {
             _ => {}
         }
         self.cells[cy as usize][cx as usize] = Cell::FREE;
+        self.notify(Outgoing::Pickup { cx, cy });
     }
 
     fn try_place_bomb(&mut self, pi: usize) {
-        if !(self.players[pi].space && self.players[pi].space_released) {
+        if !self.authority(pi) || !(self.players[pi].space && self.players[pi].space_released) {
             return;
         }
         self.players[pi].space_released = false;
@@ -224,6 +264,7 @@ impl World {
         self.events.push(Event::BombPlaced);
         self.players[pi].bombs_set += 1;
         self.set_bomb(cx, cy, pi);
+        self.notify(Outgoing::BombPlaced { cx, cy });
     }
 
     /// `Grid.setBomb`
@@ -244,6 +285,8 @@ impl World {
             kicked: false,
             exploded: false,
             old: None,
+            id: None,
+            remote_kicked: false,
         });
         self.cells[cy as usize][cx as usize] = Cell { kind: Kind::ArmedBomb, open: false };
     }
@@ -304,7 +347,7 @@ impl World {
                 p.y = 40.0 * ((p.y + 20.0) / 40.0).floor();
             }
             if let Some((bx, by, cell)) = probe {
-                if cell.kind == Kind::ArmedBomb && self.players[pi].kick {
+                if cell.kind == Kind::ArmedBomb && self.players[pi].kick && self.authority(pi) {
                     let (sx, sy) = (self.players[pi].x, self.players[pi].y);
                     let own_is_bomb = matches!(self.stone_at_px(sx, sy), Some((_, _, c)) if c.kind == Kind::ArmedBomb);
                     if !own_is_bomb {
@@ -326,11 +369,24 @@ impl World {
         }
         if b.kicked_by != Some(by) {
             b.kicked_by = Some(by);
+            b.remote_kicked = false;
             b.moving = true;
             b.kicked = true;
             b.dx = dx;
             b.dy = dy;
+            let id = match b.id {
+                Some(id) => id,
+                None => {
+                    let id = self.next_bomb_id;
+                    self.next_bomb_id += 1;
+                    self.bombs[i].id = Some(id);
+                    id
+                }
+            };
+            let b = &self.bombs[i];
+            let (bcx, bcy, t) = (b.cx, b.cy, b.start + BOMB_FUSE_MS - self.now);
             self.events.push(Event::Kick);
+            self.notify(Outgoing::Kick { cx: bcx, cy: bcy, id, dx, dy, t });
         }
     }
 
@@ -344,7 +400,7 @@ impl World {
         if self.bombs[i].exploded {
             return;
         }
-        if self.now > BOMB_FUSE_MS + self.bombs[i].start {
+        if self.now > BOMB_FUSE_MS + self.bombs[i].start && !self.bombs[i].remote_kicked {
             self.explode(i);
             return;
         }
@@ -365,7 +421,9 @@ impl World {
 
         // a player other than the kicker stops the bomb and is pushed one cell on
         let hit = (0..2).find(|&pi| {
-            Some(pi) != kicked_by && self.players[pi].hit_test(x + ox + BOARD_X, y + oy + BOARD_Y)
+            Some(pi) != kicked_by
+                && self.authority(pi)
+                && self.players[pi].hit_test(x + ox + BOARD_X, y + oy + BOARD_Y)
         });
         if let Some(pi) = hit {
             self.snap_bomb(i);
@@ -373,6 +431,12 @@ impl World {
             self.players[pi].x = bx + ox * 2.0 + BOARD_X;
             self.players[pi].y = by + oy * 2.0 + BOARD_Y;
             self.bombs[i].moving = false;
+            self.bombs[i].remote_kicked = false;
+            let b = &self.bombs[i];
+            let (cx, cy, t) = (b.cx, b.cy, b.start + BOMB_FUSE_MS - self.now);
+            if let Some(id) = b.id {
+                self.notify(Outgoing::Stop { cx, cy, id, t });
+            }
             return;
         }
 
@@ -386,13 +450,19 @@ impl World {
             return;
         }
         if (ncx, ncy) != (cx, cy) {
-            let restored = self.bombs[i].old.take().unwrap_or(Cell::FREE);
-            self.cells[cy as usize][cx as usize] = restored;
-            self.bombs[i].old = Some(self.cells[ncy as usize][ncx as usize]);
-            self.cells[ncy as usize][ncx as usize] = Cell { kind: Kind::ArmedBomb, open: false };
-            self.bombs[i].cx = ncx;
-            self.bombs[i].cy = ncy;
+            self.move_bomb_to(i, ncx, ncy);
         }
+    }
+
+    /// Moves the grid marker of a bomb to another cell (the cell it leaves gets its old stone back).
+    fn move_bomb_to(&mut self, i: usize, ncx: i32, ncy: i32) {
+        let (cx, cy) = (self.bombs[i].cx, self.bombs[i].cy);
+        let restored = self.bombs[i].old.take().unwrap_or(Cell::FREE);
+        self.cells[cy as usize][cx as usize] = restored;
+        self.bombs[i].old = Some(self.cells[ncy as usize][ncx as usize]);
+        self.cells[ncy as usize][ncx as usize] = Cell { kind: Kind::ArmedBomb, open: false };
+        self.bombs[i].cx = ncx;
+        self.bombs[i].cy = ncy;
     }
 
     /// `Bomb.explode`: centre flame plus four arms of `numBliz` tiles.
@@ -401,6 +471,12 @@ impl World {
             return;
         }
         self.events.push(Event::Explosion);
+        if self.bombs[i].kicked && !self.bombs[i].remote_kicked {
+            if let Some(id) = self.bombs[i].id {
+                let (cx, cy) = (self.bombs[i].cx, self.bombs[i].cy);
+                self.notify(Outgoing::Detonate { cx, cy, id });
+            }
+        }
         if self.bombs[i].kicked {
             self.bombs[i].kicked = false;
             self.bombs[i].moving = false;
@@ -452,6 +528,86 @@ impl World {
     }
 
     // ---- flames ----------------------------------------------------------------------------------------------
+
+    // ---- messages from the other client --------------------------------------------------------------------------
+
+    fn bomb_by_id(&self, id: i64) -> Option<usize> {
+        self.bombs.iter().position(|b| !b.exploded && b.id == Some(id))
+    }
+
+    /// Message 17: `Grid.setBomb` for the remote player (its `bombsSet` is not touched, like the original).
+    pub fn remote_place_bomb(&mut self, cx: i32, cy: i32, owner: usize) {
+        if in_bounds(cx, cy) {
+            self.events.push(Event::BombPlaced);
+            self.set_bomb(cx, cy, owner);
+        }
+    }
+
+    /// Message 18: the remote player took an item; its new speed and blast range are adopted.
+    pub fn remote_pickup(&mut self, cx: i32, cy: i32, owner: usize, speed: f64, blast: u32) {
+        self.players[owner].speed = speed;
+        self.players[owner].num_blast = blast;
+        self.events.push(Event::PickUp);
+        if in_bounds(cx, cy) && self.cells[cy as usize][cx as usize].is_item() {
+            self.cells[cy as usize][cx as usize] = Cell::FREE;
+        }
+    }
+
+    /// Message 19: `Bomb.remoteKick`.
+    pub fn remote_kick(&mut self, cx: i32, cy: i32, owner: usize, dx: f64, dy: f64, t: i64, id: i64) {
+        let Some(i) = self.bomb_index_at(cx, cy) else { return };
+        let now = self.now;
+        let b = &mut self.bombs[i];
+        b.kicked_by = Some(owner);
+        b.remote_kicked = true;
+        b.start = now - BOMB_FUSE_MS + t;
+        b.moving = true;
+        b.kicked = true;
+        b.dx = dx;
+        b.dy = dy;
+        if b.id.is_none() {
+            b.id = Some(id);
+        }
+        self.events.push(Event::Kick);
+    }
+
+    /// Message 11: `BombManager.remoteStopBomb`; the sender keeps responsibility for the detonation.
+    pub fn remote_stop(&mut self, id: i64, cx: i32, cy: i32, t: i64) {
+        let Some(i) = self.bomb_by_id(id) else { return };
+        if !in_bounds(cx, cy) {
+            return;
+        }
+        if (self.bombs[i].cx, self.bombs[i].cy) != (cx, cy) {
+            self.move_bomb_to(i, cx, cy);
+        }
+        let now = self.now;
+        let b = &mut self.bombs[i];
+        b.start = now - BOMB_FUSE_MS + t;
+        b.moving = false;
+        b.remote_kicked = true;
+        self.snap_bomb(i);
+    }
+
+    /// Message 10: `BombManager.remoteExplode`.
+    pub fn remote_detonate(&mut self, id: i64, cx: i32, cy: i32) {
+        let Some(i) = self.bomb_by_id(id) else { return };
+        if !in_bounds(cx, cy) {
+            return;
+        }
+        if (self.bombs[i].cx, self.bombs[i].cy) != (cx, cy) {
+            self.move_bomb_to(i, cx, cy);
+        }
+        self.explode(i);
+    }
+
+    /// Message `die`: the remote player is dead, the game is locked (`Game.remotePlayerDie`).
+    pub fn remote_die(&mut self, pi: usize, x: f64, y: f64) {
+        self.players[pi].x = x;
+        self.players[pi].y = y;
+        self.players[pi].die();
+        self.locked = true;
+        self.lock_now = -1;
+    }
 
     /// `Grid.setBliz`
     fn spawn_flame(&mut self, cx: i32, cy: i32, owner: usize, rot: u16, center: bool) {
