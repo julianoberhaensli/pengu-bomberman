@@ -1,0 +1,21 @@
+[package]
+name = "bomberpengu"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust rewrite of the Flash game Bomber Pengu (local play only)"
+
+[lib]
+name = "bomberpengu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bomberpengu"
+path = "src/main.rs"
+
+[dependencies]
+macroquad = { version = "0.4", default-features = true, features = ["audio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 1

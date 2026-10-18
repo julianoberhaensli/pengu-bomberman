@@ -1,0 +1,20 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+*.profraw
+mutants.out*/
+
+# Local output
+/shots
+
+# Reverse-engineering material
+/NOTES.md
+/assets/assets.md
+*.swf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
