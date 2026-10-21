@@ -1,9 +1,12 @@
 //! Loading of `assets/`.
 
 use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
+use macroquad::experimental::coroutines::start_coroutine;
 use macroquad::prelude::*;
 use serde_json::Value;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// A frame list with the registration offset of the original clip (frame top-left = origin + (ox, oy)).
 pub struct Strip {
@@ -66,21 +69,17 @@ const ROOT: &str = "assets";
 /// Files loaded besides the ones listed in `sprites.json`: 3 backgrounds and 5 sounds.
 const EXTRA_FILES: usize = 8;
 
-/// Counts files while loading and redraws the loading screen (about 30 times per second).
+/// Counts files while loading; the progress is shown by the loading screen drawn every frame.
 struct Loader {
     done: usize,
     total: usize,
-    last_draw: f64,
+    progress: Arc<[AtomicUsize; 2]>,
 }
 
 impl Loader {
-    async fn frame(&mut self, force: bool) {
-        let now = get_time();
-        if force || now - self.last_draw >= 1.0 / 30.0 {
-            self.last_draw = now;
-            crate::ui::draw_loading(self.done, self.total);
-            next_frame().await;
-        }
+    async fn frame(&mut self, _force: bool) {
+        self.progress[0].store(self.done, Ordering::Relaxed);
+        self.progress[1].store(self.total, Ordering::Relaxed);
     }
 
     async fn tex(&mut self, path: &str) -> Texture2D {
@@ -141,7 +140,17 @@ fn count_files(v: &Value) -> usize {
 
 impl Assets {
     pub async fn load() -> Self {
-        let mut l = Loader { done: 0, total: 0, last_draw: f64::NEG_INFINITY };
+        let progress = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let task = start_coroutine(Self::load_files(progress.clone()));
+        while !task.is_done() {
+            crate::ui::draw_loading(progress[0].load(Ordering::Relaxed), progress[1].load(Ordering::Relaxed));
+            next_frame().await;
+        }
+        task.retrieve().expect("asset loading finished")
+    }
+
+    async fn load_files(progress: Arc<[AtomicUsize; 2]>) -> Self {
+        let mut l = Loader { done: 0, total: 0, progress };
         l.frame(true).await;
         let text = macroquad::file::load_string(&format!("{ROOT}/sprites.json")).await.expect("assets/sprites.json (run from the project directory)");
         let meta: Value = serde_json::from_str(&text).unwrap();
