@@ -3,7 +3,8 @@
 
 use crate::assets::Assets;
 use crate::ui::{self, clip, drain_chars, panel, text, text_centered, Field, Style, ERROR, INK};
-use crate::{apply_keys, draw_game, game_bar, P1_BOMB, P1_DIRS, P2_BOMB, P2_DIRS, SOLO_HINT, STEP};
+use crate::{apply_keys, draw_game, game_bar, solo_hint, P1_BOMB, P1_DIRS, P2_BOMB, P2_DIRS, STEP};
+use bomberpengu::i18n::{server_text, tr, tr_with, Key};
 use bomberpengu::lobby::{Entry, Lobby, LobbyEvent, Reaction};
 use bomberpengu::net::{Connection, NetEvent};
 use bomberpengu::netgame::{NetMatch, NetOutcome, NetPhase};
@@ -96,19 +97,19 @@ impl Online {
     pub fn connect(&mut self) {
         let name = self.name.text.trim().to_string();
         if !valid_name(&name) {
-            self.status = "Ungueltiger Name (1-20 Zeichen: Buchstaben, Ziffern, Leerzeichen, _ - .)".into();
+            self.status = tr(Key::InvalidName).into();
             return;
         }
         self.lobby = Lobby::new(&name);
         self.conn = Some(Connection::connect(&self.server.text, &name));
-        self.status = "Verbinde...".into();
+        self.status = tr(Key::Connecting).into();
         self.stage = Stage::Connecting;
     }
 
     fn disconnect(&mut self, why: &str) {
         self.conn = None;
-        if self.status.is_empty() || self.status == "Verbinde..." {
-            self.status = why.to_string();
+        if self.status.is_empty() || self.status == tr(Key::Connecting) {
+            self.status = server_text(why);
         }
         self.stage = Stage::Form;
     }
@@ -140,7 +141,7 @@ impl Online {
                     self.begin_match(a, &opponent, number);
                 }
             }
-            Some(LobbyEvent::Error(t)) => self.status = t,
+            Some(LobbyEvent::Error(t)) => self.status = server_text(&t),
             Some(LobbyEvent::RematchRequested) | None => {}
         }
     }
@@ -209,16 +210,16 @@ impl Online {
         }
         draw_rectangle(0.0, 0.0, 640.0, 640.0, Color::new(0.75, 0.88, 1.0, 1.0));
         panel(60.0, 120.0, 520.0, 380.0);
-        text_centered("Online-Lobby", 320.0, 180.0, 44.0, INK);
-        text("Name", 90.0, 230.0, 20.0, INK);
+        text_centered(tr(Key::OnlineLobby), 320.0, 180.0, 44.0, INK);
+        text(tr(Key::Name), 90.0, 230.0, 20.0, INK);
         ui::draw_field(NAME_FIELD, &self.name, !self.edit_server);
-        text("Server (Adresse:Port)", 90.0, 300.0, 20.0, INK);
+        text(tr(Key::ServerAddr), 90.0, 300.0, 20.0, INK);
         ui::draw_field(SERVER_FIELD, &self.server, self.edit_server);
-        let connect = ui::button(CONNECT_BTN, "Verbinden", Style::Primary, true);
-        let back = ui::button(BACK_BTN, "Zurueck", Style::Normal, true);
-        text_centered("Tab: Feld wechseln    Enter: verbinden    Esc: zurueck", 320.0, 446.0, 16.0, INK);
+        let connect = ui::button(CONNECT_BTN, tr(Key::Connect), Style::Primary, true);
+        let back = ui::button(BACK_BTN, tr(Key::Back), Style::Normal, true);
+        text_centered(tr(Key::FormHint), 320.0, 446.0, 16.0, INK);
         if !self.status.is_empty() {
-            text(&clip(&self.status, 60), 90.0, 478.0, 18.0, ERROR);
+            ui::text_fit(&self.status, 90.0, 478.0, 460.0, 18.0, ERROR);
         }
         if back {
             return false;
@@ -231,8 +232,8 @@ impl Online {
 
     fn frame_connecting(&mut self) -> bool {
         draw_rectangle(0.0, 0.0, 640.0, 640.0, Color::new(0.75, 0.88, 1.0, 1.0));
-        text_centered(&format!("Verbinde mit {} ...", clip(&self.server.text, 40)), 320.0, 320.0, 28.0, INK);
-        if ui::button(CANCEL_BTN, "Abbrechen", Style::Normal, true) || is_key_pressed(KeyCode::Escape) {
+        text_centered(&tr_with(Key::ConnectingTo, &[&clip(&self.server.text, 40)]), 320.0, 320.0, 28.0, INK);
+        if ui::button(CANCEL_BTN, tr(Key::Cancel), Style::Normal, true) || is_key_pressed(KeyCode::Escape) {
             self.conn = None;
             self.status.clear();
             self.stage = Stage::Form;
@@ -260,12 +261,12 @@ impl Online {
     fn action_button(&self) -> (&'static str, bool) {
         match self.lobby.players.get(self.selected) {
             Some(p) if !p.me => match p.code() {
-                "0" | "3" => ("Herausfordern", true),
-                "1" => ("Annehmen", true),
-                "2" | "23" => ("Zurueckziehen", true),
-                _ => ("Herausfordern", false),
+                "0" | "3" => (tr(Key::Challenge), true),
+                "1" => (tr(Key::Accept), true),
+                "2" | "23" => (tr(Key::Withdraw), true),
+                _ => (tr(Key::Challenge), false),
             },
-            _ => ("Herausfordern", false),
+            _ => (tr(Key::Challenge), false),
         }
     }
 
@@ -335,10 +336,10 @@ impl Online {
     fn draw_room(&self, a: &Assets) {
         draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
         panel(30.0, 30.0, 580.0, 580.0);
-        text_centered("Spielerraum", 320.0, 76.0, 38.0, INK);
-        text(&format!("{} auf {}", self.lobby.my_name, clip(&self.server.text, 40)), 48.0, 100.0, 16.0, INK);
-        text("Spieler", 66.0, 134.0, 16.0, INK);
-        text("G/V/U", 330.0, 134.0, 16.0, INK);
+        text_centered(tr(Key::Room), 320.0, 76.0, 38.0, INK);
+        text(&tr_with(Key::RoomOn, &[&self.lobby.my_name, &clip(&self.server.text, 40)]), 48.0, 100.0, 16.0, INK);
+        text(tr(Key::ColPlayer), 66.0, 134.0, 16.0, INK);
+        text(tr(Key::ColRecord), 330.0, 134.0, 16.0, INK);
         let first = self.first_row();
         for (i, p) in self.lobby.players.iter().enumerate().skip(first).take(VISIBLE_ROWS) {
             let y = LIST_TOP + (i - first) as f32 * ROW_H;
@@ -354,19 +355,26 @@ impl Online {
             text(&format!("{w}/{l}/{d}"), 330.0, y + 16.0, 18.0, INK);
         }
         if self.lobby.players.len() > VISIBLE_ROWS {
-            text(&format!("{} Spieler", self.lobby.players.len()), 48.0, LIST_TOP + ROW_H * VISIBLE_ROWS as f32 + 16.0, 14.0, INK);
+            text(&tr_with(Key::PlayerCount, &[&self.lobby.players.len()]), 48.0, LIST_TOP + ROW_H * VISIBLE_ROWS as f32 + 16.0, 14.0, INK);
         }
         // selected player
         draw_rectangle_lines(410.0, 120.0, 190.0, 220.0, 2.0, INK);
         if let Some(p) = self.lobby.players.get(self.selected) {
             let (w, l, d, pct) = p.record();
             text(&clip(&p.name, 16), 420.0, 146.0, 20.0, INK);
-            for (i, s) in [format!("Gesamt: {}", w + l + d), format!("Gewonnen: {w}"), format!("Verloren: {l}"), format!("Unentschieden: {d}"), format!("Quote: {pct}%")].iter().enumerate() {
-                text(s, 420.0, 176.0 + i as f32 * 22.0, 16.0, INK);
+            let stats = [
+                tr_with(Key::StatTotal, &[&(w + l + d)]),
+                tr_with(Key::StatWon, &[&w]),
+                tr_with(Key::StatLost, &[&l]),
+                tr_with(Key::StatDrawn, &[&d]),
+                tr_with(Key::StatRate, &[&pct]),
+            ];
+            for (i, s) in stats.iter().enumerate() {
+                ui::text_fit(s, 420.0, 176.0 + i as f32 * 22.0, 176.0, 16.0, INK);
             }
-            text(p.action_text(), 420.0, 310.0, 13.0, INK);
+            ui::text_fit(p.action_text(), 420.0, 310.0, 176.0, 13.0, INK);
             if p.me {
-                text("(Sie)", 420.0, 326.0, 13.0, INK);
+                text(tr(Key::You), 420.0, 326.0, 13.0, INK);
             }
         }
         // chat
@@ -379,10 +387,10 @@ impl Online {
         ui::draw_field(CHAT_FIELD, &self.chat_input, true);
         let (label, enabled) = self.action_button();
         ui::draw_button(ACT_BTN, label, Style::Primary, enabled, false);
-        ui::draw_button(ALL_BTN, if self.lobby.challenged_all { "Alle zurueckziehen" } else { "Alle herausfordern" }, Style::Normal, true, false);
-        ui::draw_button(LEAVE_BTN, "Trennen", Style::Normal, true, false);
+        ui::draw_button(ALL_BTN, tr(if self.lobby.challenged_all { Key::WithdrawAll } else { Key::ChallengeAll }), Style::Normal, true, false);
+        ui::draw_button(LEAVE_BTN, tr(Key::Disconnect), Style::Normal, true, false);
         if !self.status.is_empty() {
-            text(&clip(&self.status, 60), 48.0, 118.0, 16.0, ERROR);
+            ui::text_fit(&self.status, 48.0, 118.0, 540.0, 16.0, ERROR);
         }
     }
 
@@ -431,12 +439,12 @@ impl Online {
     fn draw_match(a: &Assets, nm: &NetMatch, lobby: &Lobby) -> bool {
         if !nm.ready {
             draw_texture(&a.bg_game, 0.0, 0.0, WHITE);
-            text_centered("Warte auf Gegner...", 360.0, 250.0, 34.0, INK);
-            return game_bar(a, SOLO_HINT, "Aufgeben (Esc)");
+            text_centered(tr(Key::WaitingOpponent), 360.0, 250.0, 34.0, INK);
+            return game_bar(a, solo_hint(), tr(Key::Surrender));
         }
-        let tag = |i: usize| format!("{}{}", clip(&nm.names[i], 14), if i == nm.me { " (du)" } else { "" });
+        let tag = |i: usize| format!("{}{}", clip(&nm.names[i], 14), if i == nm.me { tr(Key::YouTag) } else { "" });
         let (n0, n1) = (tag(0), tag(1));
-        let surrender = draw_game(a, &nm.world, [&n0, &n1], SOLO_HINT, "Aufgeben (Esc)");
+        let surrender = draw_game(a, &nm.world, [&n0, &n1], solo_hint(), tr(Key::Surrender));
         for i in 0..2 {
             let y0 = if i == 0 { 48.0 } else { 213.0 };
             let (ping, fps) = if i == nm.me { (nm.my_ping, nm.my_fps) } else { (nm.remote_ping, nm.remote_fps) };
@@ -457,25 +465,25 @@ impl Online {
         let opp_here = opp.as_ref().is_some_and(|o| self.lobby.find(o).is_some());
         draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
         panel(60.0, 40.0, 520.0, 440.0);
-        text_centered("Ergebnis", 320.0, 95.0, 40.0, INK);
+        text_centered(tr(Key::Result), 320.0, 95.0, 40.0, INK);
         let who = opp.as_deref().unwrap_or("");
-        text_centered(&format!("{} gegen {}", clip(&self.lobby.my_name, 16), clip(who, 16)), 320.0, 125.0, 22.0, INK);
+        text_centered(&tr_with(Key::VersusLine, &[&clip(&self.lobby.my_name, 16), &clip(who, 16)]), 320.0, 125.0, 22.0, INK);
         let msg = match outcome {
-            NetOutcome::Win => "Gewonnen!!!",
-            NetOutcome::Lose => "Leider verloren...",
-            NetOutcome::Draw => "Untenschieden!",
+            NetOutcome::Win => Key::Won,
+            NetOutcome::Lose => Key::Lost,
+            NetOutcome::Draw => Key::Draw,
         };
-        text_centered(msg, 320.0, 210.0, 54.0, INK);
+        text_centered(tr(msg), 320.0, 210.0, 54.0, INK);
         let note = if !opp_here {
-            format!("{who} hat den Raum verlassen.")
+            tr_with(Key::OpponentLeft, &[&who])
         } else if self.lobby.rematch_requested {
-            format!("{who} moechte nochmal spielen!")
+            tr_with(Key::RematchAsked, &[&who])
         } else {
-            "und jetzt? Entscheiden Sie...".to_string()
+            tr(Key::WhatNow).to_string()
         };
         text_centered(&note, 320.0, 330.0, 26.0, INK);
-        text_centered("Enter: nochmal spielen    Esc: zurueck zum Raum", 320.0, 462.0, 16.0, INK);
-        let (again, back) = ui::after_buttons(opp_here, "Zum Raum");
+        text_centered(tr(Key::AfterHintOnline), 320.0, 462.0, 16.0, INK);
+        let (again, back) = ui::after_buttons(opp_here, tr(Key::ToRoom));
         // Enter doubles as a bomb key, so it is ignored for a moment after the match
         let enter = is_key_pressed(KeyCode::Enter) && get_time() - self.after_since > 0.7;
         if (again || enter) && opp_here {

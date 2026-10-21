@@ -3,6 +3,7 @@
 //! A player's status is kept as the original string codes: `0` free, `1` challenged me, `2` challenged by me,
 //! `3` in a match, `13` / `23` combinations, `5` myself.
 
+use crate::i18n::{tr, Key};
 use crate::proto::{Msg, PlayerInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,13 +42,13 @@ impl Entry {
 
     /// Hint text of the room (`PlayerRoom.itemRollOver`).
     pub fn action_text(&self) -> &'static str {
-        match self.code() {
-            "0" | "3" => "Diesen Spieler herausfordern",
-            "1" => "Herausforderung annehmen",
-            "2" | "23" => "Herausforderung zurücknehmen",
-            "13" => "Keine Aktion möglich",
-            _ => "Das sind Sie...",
-        }
+        tr(match self.code() {
+            "0" | "3" => Key::ActChallenge,
+            "1" => Key::ActAccept,
+            "2" | "23" => Key::ActWithdraw,
+            "13" => Key::ActNone,
+            _ => Key::ActSelf,
+        })
     }
 }
 

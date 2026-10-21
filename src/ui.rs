@@ -1,5 +1,6 @@
 //! Shared UI widgets: buttons, panels, text fields, text helpers and the loading screen.
 
+use bomberpengu::i18n::{tr, Key};
 use macroquad::prelude::*;
 
 pub const INK: Color = Color::new(0.08, 0.16, 0.28, 1.0);
@@ -19,9 +20,16 @@ pub fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
     draw_text(s, x, y, size, color);
 }
 
+/// Shrinks the text when it would reach past the 640 px window.
 pub fn text_centered(s: &str, cx: f32, y: f32, size: f32, color: Color) {
-    let d = measure_text(s, None, size as u16, 1.0);
-    draw_text(s, (cx - d.width / 2.0).round(), y, size, color);
+    let max_w = 2.0 * cx.min(640.0 - cx) - 16.0;
+    let mut sz = size;
+    let mut d = measure_text(s, None, sz as u16, 1.0);
+    while sz > 9.0 && d.width > max_w {
+        sz -= 1.0;
+        d = measure_text(s, None, sz as u16, 1.0);
+    }
+    draw_text(s, (cx - d.width / 2.0).round(), y, sz, color);
 }
 
 /// Draws `s` with the largest size <= `size` that fits into `max_w`.
@@ -441,7 +449,7 @@ pub fn draw_field(r: Rect, f: &Field, active: bool) {
 
 pub fn draw_loading(done: usize, total: usize) {
     clear_background(ICE);
-    text_centered("Pinguin Bomberman", 320.0, 250.0, 56.0, INK);
+    text_centered(tr(Key::GameTitle), 320.0, 250.0, 56.0, INK);
     let bar = Rect::new(120.0, 300.0, 400.0, 30.0);
     round_rect(bar, 15.0, INK);
     round_rect(inset(bar, 3.0), 12.0, WHITE);
@@ -452,7 +460,7 @@ pub fn draw_loading(done: usize, total: usize) {
         round_rect(Rect::new(inner.x, inner.y, w, inner.h), inner.h / 2.0, Color::new(0.2, 0.44, 0.8, 1.0));
         round_rect(Rect::new(inner.x + 2.0, inner.y + 2.0, (w - 4.0).max(2.0), inner.h / 2.0 - 2.0), 4.0, Color::new(0.32, 0.56, 0.9, 1.0));
     }
-    let label = if total == 0 { "Lade Spieldaten...".to_string() } else { format!("{done} / {total}  ({}%)", (frac * 100.0).round() as u32) };
+    let label = if total == 0 { tr(Key::Loading).to_string() } else { format!("{done} / {total}  ({}%)", (frac * 100.0).round() as u32) };
     text_centered(&label, 320.0, 365.0, 24.0, INK);
 }
 
@@ -463,7 +471,7 @@ const MENU_BTN: Rect = Rect { x: 330.0, y: 380.0, w: 210.0, h: 46.0 };
 
 /// "Play again" and "back" buttons; returns which of them was clicked.
 pub fn after_buttons(again_enabled: bool, menu_label: &str) -> (bool, bool) {
-    (button(AGAIN_BTN, "Nochmal spielen", Style::Primary, again_enabled), button(MENU_BTN, menu_label, Style::Normal, true))
+    (button(AGAIN_BTN, tr(Key::PlayAgain), Style::Primary, again_enabled), button(MENU_BTN, menu_label, Style::Normal, true))
 }
 
 #[cfg(test)]

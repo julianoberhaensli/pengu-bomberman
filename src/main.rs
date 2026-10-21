@@ -6,6 +6,7 @@ use assets::Assets;
 use bomberpengu::ai::Ai;
 use bomberpengu::game::{Match, Outcome, Phase};
 use bomberpengu::grid::*;
+use bomberpengu::i18n::{self, tr, tr_with, Key, Lang};
 use bomberpengu::player::{Anim, Dir, Player};
 use bomberpengu::proto::{valid_name, MAX_NAME_CHARS};
 use bomberpengu::world::{Event, World, DT_MS};
@@ -20,7 +21,10 @@ const P1_DIRS: [KeyCode; 4] = [KeyCode::A, KeyCode::W, KeyCode::D, KeyCode::S];
 const P1_BOMB: KeyCode = KeyCode::Space;
 const P2_DIRS: [KeyCode; 4] = [KeyCode::Left, KeyCode::Up, KeyCode::Right, KeyCode::Down];
 const P2_BOMB: KeyCode = KeyCode::Enter;
-const SOLO_HINT: &str = "WASD / Pfeile + Leertaste / Enter";
+
+fn solo_hint() -> &'static str {
+    tr(Key::HintSolo)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -39,7 +43,7 @@ struct Game {
 
 enum Screen {
     Title { focus: usize },
-    Settings { name: ui::Field },
+    Settings { name: ui::Field, previous_lang: Lang },
     Playing(Game),
     After { mode: Mode, outcome: Outcome, born: f64 },
     Online(Box<online::Online>),
@@ -62,18 +66,18 @@ impl Game {
             Mode::Demo => [Some(Ai::new()), Some(Ai::new())],
         };
         let names = match mode {
-            Mode::VsAi => [player, "Computer"],
-            Mode::TwoPlayers => [player, "Spieler 2"],
-            Mode::Demo => ["Computer 1", "Computer 2"],
+            Mode::VsAi => [player.to_string(), tr(Key::Computer).to_string()],
+            Mode::TwoPlayers => [player.to_string(), tr(Key::Player2).to_string()],
+            Mode::Demo => [tr_with(Key::ComputerN, &[&1]), tr_with(Key::ComputerN, &[&2])],
         };
         assets.play(&assets.sounds.music);
-        Self { m: Match::new(seed), mode, ai, names: names.map(String::from) }
+        Self { m: Match::new(seed), mode, ai, names }
     }
 
     fn hint(&self) -> &'static str {
         match self.mode {
-            Mode::TwoPlayers => "1: WASD + Leertaste   2: Pfeile + Enter",
-            _ => SOLO_HINT,
+            Mode::TwoPlayers => tr(Key::HintTwo),
+            _ => solo_hint(),
         }
     }
 
@@ -148,20 +152,29 @@ fn draw_hud(w: &World, names: [&str; 2]) {
     for (i, p) in w.players.iter().enumerate() {
         let y0 = if i == 0 { 48.0 } else { 213.0 };
         text_fit(names[i], 8.0, y0, 86.0, 18.0, INK);
-        text(&format!("Bomben  {}", p.num_bombs), 12.0, y0 + 36.0, 16.0, INK);
-        text(&format!("Flamme  {}", p.num_blast), 12.0, y0 + 54.0, 16.0, INK);
-        text(&format!("Tempo   {:.0}", p.speed * 1000.0), 12.0, y0 + 72.0, 16.0, INK);
-        text(&format!("Kick    {}", if p.kick { "ja" } else { "-" }), 12.0, y0 + 90.0, 16.0, INK);
+        let stats = [
+            (Key::HudBombs, p.num_bombs.to_string()),
+            (Key::HudFlame, p.num_blast.to_string()),
+            (Key::HudSpeed, format!("{:.0}", p.speed * 1000.0)),
+            (Key::HudKick, if p.kick { tr(Key::Yes).to_string() } else { "-".to_string() }),
+        ];
+        for (i, (k, v)) in stats.iter().enumerate() {
+            text_fit(&format!("{} {v}", tr(*k)), 12.0, y0 + 36.0 + i as f32 * 18.0, 84.0, 16.0, INK);
+        }
     }
 }
 
 const SOUND_BTN: Rect = Rect { x: 376.0, y: 592.0, w: 118.0, h: 38.0 };
 const LEAVE_BTN: Rect = Rect { x: 504.0, y: 592.0, w: 128.0, h: 38.0 };
 
+fn sound_label(a: &Assets) -> &'static str {
+    tr(if a.sound_on.get() { Key::SoundOn } else { Key::SoundOff })
+}
+
 /// Bottom bar of every game screen: control hint, sound toggle and the leave button. Returns `true` when leave was clicked.
 fn game_bar(a: &Assets, hint: &str, leave: &str) -> bool {
     text_fit(hint, 8.0, 616.0, 360.0, 16.0, INK);
-    if ui::button(SOUND_BTN, if a.sound_on.get() { "Ton: an" } else { "Ton: aus" }, Style::Normal, true) {
+    if ui::button(SOUND_BTN, sound_label(a), Style::Normal, true) {
         a.sound_on.set(!a.sound_on.get());
     }
     ui::button(LEAVE_BTN, leave, Style::Normal, true)
@@ -220,7 +233,7 @@ fn draw_game(a: &Assets, w: &World, names: [&str; 2], hint: &str, leave: &str) -
     game_bar(a, hint, leave)
 }
 
-const MENU: [&str; 4] = ["Gegen Computer", "Zwei Spieler", "Online-Lobby", "Einstellungen"];
+const MENU: [Key; 4] = [Key::MenuVsAi, Key::MenuTwo, Key::MenuOnline, Key::MenuSettings];
 
 /// The mode selection is a fixed 2x2 grid of equally styled buttons in the bottom panel of the title background.
 fn menu_rect(i: usize) -> Rect {
@@ -230,44 +243,37 @@ fn menu_rect(i: usize) -> Rect {
 /// Draws the title screen; returns the menu entry that was clicked.
 fn draw_title(a: &Assets, player: &str, focus: usize) -> Option<usize> {
     draw_texture(&a.bg_title, 0.0, 0.0, WHITE);
-    text_centered("Pinguin Bomberman", 320.0, 70.0, 56.0, INK);
+    text_centered(tr(Key::GameTitle), 320.0, 70.0, 56.0, INK);
     // left panel (x 18..310): item legend, right panel (x 325..620): controls
-    text("Items", 32.0, 125.0, 30.0, INK);
-    let items = ["Bombe: eine Bombe mehr", "Tempo: schneller laufen", "Flamme: groessere Explosion", "Kick: Bomben wegschieben"];
+    text(tr(Key::Items), 32.0, 125.0, 30.0, INK);
+    let items = [Key::ItemBomb, Key::ItemSpeed, Key::ItemBlast, Key::ItemKick];
     for (i, l) in items.iter().enumerate() {
         let y = 160.0 + i as f32 * 62.0;
         a.boxes.draw(2 + i, 58.0, y + 20.0);
-        text(l, 88.0, y + 26.0, 18.0, INK);
+        text_fit(tr(*l), 88.0, y + 26.0, 214.0, 18.0, INK);
     }
-    text("Spielername", 32.0, 418.0, 16.0, INK);
+    text(tr(Key::PlayerName), 32.0, 418.0, 16.0, INK);
     text_fit(player, 32.0, 442.0, 262.0, 24.0, INK);
-    text("Steuerung", 340.0, 185.0, 30.0, INK);
-    let lines = [
-        "Spieler 1",
-        "  W A S D: laufen",
-        "  Leertaste: Bombe",
-        "Spieler 2 (Zwei Spieler)",
-        "  Pfeiltasten: laufen",
-        "  Enter: Bombe",
-        "Allein: beide Tastensaetze",
-        "Wer in die Flammen laeuft, verliert.",
-    ];
+    text(tr(Key::Controls), 340.0, 185.0, 30.0, INK);
+    let lines = [Key::CtrlP1, Key::CtrlP1Move, Key::CtrlP1Bomb, Key::CtrlP2, Key::CtrlP2Move, Key::CtrlP2Bomb, Key::CtrlAlone, Key::CtrlRule];
     for (i, l) in lines.iter().enumerate() {
-        text_fit(l, 340.0, 215.0 + i as f32 * 24.0, 270.0, 18.0, INK);
+        text_fit(tr(*l), 340.0, 215.0 + i as f32 * 24.0, 270.0, 18.0, INK);
     }
     let mut hit = None;
-    for (i, label) in MENU.iter().enumerate() {
+    for (i, key) in MENU.iter().enumerate() {
         let r = menu_rect(i);
-        ui::draw_button(r, label, if i == 0 { Style::Primary } else { Style::Normal }, true, i == focus);
+        ui::draw_button(r, tr(*key), if i == 0 { Style::Primary } else { Style::Normal }, true, i == focus);
         if ui::clicked(r) {
             hit = Some(i);
         }
     }
-    text_centered("Pfeiltasten / Maus: waehlen    Enter: starten    1-4: Direktwahl", 320.0, 628.0, 16.0, INK);
+    text_centered(tr(Key::TitleHint), 320.0, 628.0, 16.0, INK);
     hit
 }
 
 const NAME_FIELD: Rect = Rect { x: 90.0, y: 222.0, w: 460.0, h: 40.0 };
+const SETTINGS_SOUND_BTN: Rect = Rect { x: 90.0, y: 345.0, w: 200.0, h: 44.0 };
+const SETTINGS_LANG_BTN: Rect = Rect { x: 330.0, y: 345.0, w: 220.0, h: 44.0 };
 
 pub fn name_field(name: &str) -> ui::Field {
     ui::Field::new(name, MAX_NAME_CHARS, ui::name_char)
@@ -279,20 +285,24 @@ fn frame_settings(a: &Assets, name: &mut ui::Field) -> Option<bool> {
     let valid = valid_name(name.text.trim());
     draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
     ui::panel(60.0, 110.0, 520.0, 370.0);
-    text_centered("Einstellungen", 320.0, 165.0, 40.0, INK);
-    text("Spielername", 90.0, 212.0, 20.0, INK);
+    text_centered(tr(Key::Settings), 320.0, 165.0, 40.0, INK);
+    text(tr(Key::PlayerName), 90.0, 212.0, 20.0, INK);
     ui::draw_field(NAME_FIELD, name, true);
     if valid {
-        text("Bis zu 20 Zeichen: Buchstaben, Ziffern, Leerzeichen, _ - .", 90.0, 288.0, 15.0, INK);
+        text_fit(tr(Key::NameRule), 90.0, 288.0, 460.0, 15.0, INK);
     } else {
-        text("Bitte einen Namen eingeben.", 90.0, 288.0, 16.0, ui::ERROR);
+        text_fit(tr(Key::NameEmpty), 90.0, 288.0, 460.0, 16.0, ui::ERROR);
     }
-    text("Ton", 90.0, 335.0, 20.0, INK);
-    if ui::button(Rect::new(90.0, 345.0, 200.0, 44.0), if a.sound_on.get() { "Ton: an" } else { "Ton: aus" }, Style::Normal, true) {
+    text(tr(Key::Sound), 90.0, 335.0, 20.0, INK);
+    text(tr(Key::Language), SETTINGS_LANG_BTN.x, 335.0, 20.0, INK);
+    if ui::button(SETTINGS_SOUND_BTN, sound_label(a), Style::Normal, true) {
         a.sound_on.set(!a.sound_on.get());
     }
-    let done = ui::button(Rect::new(250.0, 405.0, 140.0, 44.0), "Fertig", Style::Primary, valid);
-    text_centered("Enter: uebernehmen    Esc: abbrechen", 320.0, 468.0, 16.0, INK);
+    if ui::button(SETTINGS_LANG_BTN, i18n::lang().name(), Style::Normal, true) {
+        i18n::set_lang(i18n::lang().next());
+    }
+    let done = ui::button(Rect::new(250.0, 405.0, 140.0, 44.0), tr(Key::Done), Style::Primary, valid);
+    text_centered(tr(Key::SettingsHint), 320.0, 468.0, 16.0, INK);
     if (done || is_key_pressed(KeyCode::Enter)) && valid {
         Some(true)
     } else if is_key_pressed(KeyCode::Escape) {
@@ -306,23 +316,24 @@ fn frame_settings(a: &Assets, name: &mut ui::Field) -> Option<bool> {
 fn draw_after(a: &Assets, mode: Mode, outcome: Outcome, player: &str) -> (bool, bool) {
     draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
     ui::panel(60.0, 40.0, 520.0, 440.0);
-    text_centered("Ergebnis", 320.0, 95.0, 40.0, INK);
-    text_centered("Pinguin Bomberman", 320.0, 125.0, 22.0, INK);
+    text_centered(tr(Key::Result), 320.0, 95.0, 40.0, INK);
+    text_centered(tr(Key::GameTitle), 320.0, 125.0, 22.0, INK);
     // AfterMatch.matchResult frames: "Untenschieden!" / "Gewonnen!!!" / "Leider verloren..." (original spelling)
+    let p2 = tr(Key::Player2).to_string();
     let (msg, who) = match (mode, outcome) {
-        (_, Outcome::Draw) => ("Untenschieden!", ""),
-        (Mode::VsAi, Outcome::Win(0)) => ("Gewonnen!!!", ""),
-        (Mode::VsAi, Outcome::Win(_)) => ("Leider verloren...", ""),
-        (Mode::TwoPlayers, Outcome::Win(i)) => ("Gewonnen!!!", if i == 0 { player } else { "Spieler 2" }),
-        (Mode::Demo, Outcome::Win(i)) => ("Gewonnen!!!", if i == 0 { "Computer 1" } else { "Computer 2" }),
+        (_, Outcome::Draw) => (Key::Draw, String::new()),
+        (Mode::VsAi, Outcome::Win(0)) => (Key::Won, String::new()),
+        (Mode::VsAi, Outcome::Win(_)) => (Key::Lost, String::new()),
+        (Mode::TwoPlayers, Outcome::Win(i)) => (Key::Won, if i == 0 { player.to_string() } else { p2 }),
+        (Mode::Demo, Outcome::Win(i)) => (Key::Won, tr_with(Key::ComputerN, &[&(i + 1)])),
     };
-    text_centered(msg, 320.0, 210.0, 54.0, INK);
+    text_centered(tr(msg), 320.0, 210.0, 54.0, INK);
     if !who.is_empty() {
-        text_centered(&ui::clip(who, MAX_NAME_CHARS), 320.0, 250.0, 28.0, INK);
+        text_centered(&ui::clip(&who, MAX_NAME_CHARS), 320.0, 250.0, 28.0, INK);
     }
-    text_centered("und jetzt? Entscheiden Sie...", 320.0, 330.0, 26.0, INK);
-    text_centered("Enter: nochmal spielen    Esc: zurueck zum Menue", 320.0, 462.0, 16.0, INK);
-    ui::after_buttons(true, "Zum Menue")
+    text_centered(tr(Key::WhatNow), 320.0, 330.0, 26.0, INK);
+    text_centered(tr(Key::AfterHint), 320.0, 462.0, 16.0, INK);
+    ui::after_buttons(true, tr(Key::ToMenu))
 }
 
 // ---- main ------------------------------------------------------------------------------------------------------
@@ -340,6 +351,7 @@ struct Cli {
     shot_frames: u32,
     name: String,
     server: String,
+    lang: Option<Lang>,
 }
 
 fn cli() -> Cli {
@@ -364,14 +376,18 @@ fn cli() -> Cli {
         // original: "Gast" + Math.round(Math.random() * 100000) when no user name is given
         name: val("--name").unwrap_or_else(|| format!("Gast{}", rand::gen_range(0, 100_001))),
         server: val("--server").unwrap_or_else(bomberpengu::net::default_server),
+        lang: val("--lang").and_then(|s| Lang::from_code(&s)),
     }
 }
 
 #[macroquad::main(window_conf)]
 async fn main() {
     rand::srand(macroquad::miniquad::date::now() as u64);
-    let assets = Assets::load().await;
     let cli = cli();
+    if let Some(l) = cli.lang {
+        i18n::set_lang(l);
+    }
+    let assets = Assets::load().await;
     let mut player_name = cli.name.clone();
     let mut screen = match (cli.mode, cli.screen.as_deref()) {
         _ if cli.online => {
@@ -384,7 +400,7 @@ async fn main() {
             Screen::Online(Box::new(o))
         }
         (_, Some("title")) => Screen::Title { focus: 0 },
-        (_, Some("settings")) => Screen::Settings { name: name_field(&player_name) },
+        (_, Some("settings")) => Screen::Settings { name: name_field(&player_name), previous_lang: i18n::lang() },
         (_, Some("after")) => Screen::After { mode: Mode::VsAi, outcome: Outcome::Win(0), born: get_time() },
         (Some(mode), _) => Screen::Playing(Game::new(mode, cli.seed.unwrap_or_else(new_seed), &assets, &player_name)),
         _ => Screen::Title { focus: 0 },
@@ -432,7 +448,7 @@ async fn main() {
                     Some(2) => next = Some(Screen::Online(Box::new(online::Online::new(&player_name, &cli.server)))),
                     Some(_) => {
                         ui::drain_chars();
-                        next = Some(Screen::Settings { name: name_field(&player_name) });
+                        next = Some(Screen::Settings { name: name_field(&player_name), previous_lang: i18n::lang() });
                     }
                     None => {
                         if cfg!(not(target_arch = "wasm32")) && is_key_pressed(KeyCode::Escape) {
@@ -441,10 +457,12 @@ async fn main() {
                     }
                 }
             }
-            Screen::Settings { name } => {
+            Screen::Settings { name, previous_lang } => {
                 if let Some(apply) = frame_settings(&assets, name) {
                     if apply {
                         player_name = name.text.trim().to_string();
+                    } else {
+                        i18n::set_lang(*previous_lang);
                     }
                     next = Some(Screen::Title { focus: 3 });
                 }
@@ -459,7 +477,7 @@ async fn main() {
                 }
                 clear_background(GRAY);
                 let names = [g.names[0].as_str(), g.names[1].as_str()];
-                let leave = draw_game(&assets, &g.m.world, names, g.hint(), "Menue (Esc)");
+                let leave = draw_game(&assets, &g.m.world, names, g.hint(), tr(Key::MenuLeave));
                 if g.m.phase == Phase::Finished {
                     next = Some(Screen::After { mode: g.mode, outcome: g.m.outcome.unwrap_or(Outcome::Draw), born: get_time() });
                 } else if leave || is_key_pressed(KeyCode::Escape) {

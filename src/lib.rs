@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod game;
 pub mod grid;
+pub mod i18n;
 pub mod lobby;
 pub mod net;
 pub mod netgame;
