@@ -139,7 +139,7 @@ fn draw_player(a: &Assets, p: &Player) {
         Anim::Go => (&pg.go, t),
         Anim::Up => (&pg.up, t),
         Anim::Down => (&pg.down, t),
-        Anim::Dead => (&pg.dead, 0),
+        Anim::Dead => (&pg.dead, t.min(pg.dead.frames.len() - 1)),
     };
     strip.draw_ex(frame, p.x as f32, p.y as f32, p.facing_left, 0.0);
 }
