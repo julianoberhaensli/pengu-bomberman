@@ -15,15 +15,6 @@ static CURRENT: AtomicU8 = AtomicU8::new(0);
 impl Lang {
     pub const ALL: [Lang; 3] = [Lang::De, Lang::En, Lang::Es];
 
-    /// The language's own name, shown on the settings button.
-    pub fn name(self) -> &'static str {
-        match self {
-            Lang::De => "Deutsch",
-            Lang::En => "English",
-            Lang::Es => "Español",
-        }
-    }
-
     pub fn code(self) -> &'static str {
         match self {
             Lang::De => "de",
@@ -34,10 +25,6 @@ impl Lang {
 
     pub fn from_code(s: &str) -> Option<Lang> {
         Self::ALL.into_iter().find(|l| l.code().eq_ignore_ascii_case(s.trim()))
-    }
-
-    pub fn next(self) -> Lang {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
     }
 }
 

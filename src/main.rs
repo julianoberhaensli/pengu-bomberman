@@ -273,7 +273,11 @@ fn draw_title(a: &Assets, player: &str, focus: usize) -> Option<usize> {
 
 const NAME_FIELD: Rect = Rect { x: 90.0, y: 222.0, w: 460.0, h: 40.0 };
 const SETTINGS_SOUND_BTN: Rect = Rect { x: 90.0, y: 345.0, w: 200.0, h: 44.0 };
-const SETTINGS_LANG_BTN: Rect = Rect { x: 330.0, y: 345.0, w: 220.0, h: 44.0 };
+const SETTINGS_LANG_X: f32 = 330.0;
+
+fn flag_rect(i: usize) -> Rect {
+    Rect::new(SETTINGS_LANG_X + i as f32 * 76.0, 345.0, 64.0, 44.0)
+}
 
 pub fn name_field(name: &str) -> ui::Field {
     ui::Field::new(name, MAX_NAME_CHARS, ui::name_char)
@@ -294,12 +298,14 @@ fn frame_settings(a: &Assets, name: &mut ui::Field) -> Option<bool> {
         text_fit(tr(Key::NameEmpty), 90.0, 288.0, 460.0, 16.0, ui::ERROR);
     }
     text(tr(Key::Sound), 90.0, 335.0, 20.0, INK);
-    text(tr(Key::Language), SETTINGS_LANG_BTN.x, 335.0, 20.0, INK);
+    text(tr(Key::Language), SETTINGS_LANG_X, 335.0, 20.0, INK);
     if ui::button(SETTINGS_SOUND_BTN, sound_label(a), Style::Normal, true) {
         a.sound_on.set(!a.sound_on.get());
     }
-    if ui::button(SETTINGS_LANG_BTN, i18n::lang().name(), Style::Normal, true) {
-        i18n::set_lang(i18n::lang().next());
+    for (i, l) in Lang::ALL.into_iter().enumerate() {
+        if ui::flag_button(flag_rect(i), l, l == i18n::lang()) {
+            i18n::set_lang(l);
+        }
     }
     let done = ui::button(Rect::new(250.0, 405.0, 140.0, 44.0), tr(Key::Done), Style::Primary, valid);
     text_centered(tr(Key::SettingsHint), 320.0, 468.0, 16.0, INK);

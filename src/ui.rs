@@ -1,6 +1,6 @@
 //! Shared UI widgets: buttons, panels, text fields, text helpers and the loading screen.
 
-use bomberpengu::i18n::{tr, Key};
+use bomberpengu::i18n::{tr, Key, Lang};
 use macroquad::prelude::*;
 
 pub const INK: Color = Color::new(0.08, 0.16, 0.28, 1.0);
@@ -443,6 +443,58 @@ pub fn draw_field(r: Rect, f: &Field, active: bool) {
     if active && (now - f.last_input < 0.6 || (now * 2.0) as i64 % 2 == 0) {
         draw_rectangle((x0 + w[f.cursor] - sc).round(), r.y + 5.0, 2.0, r.h - 10.0, INK);
     }
+}
+
+// ---- language flags ---------------------------------------------------------------------------------------------
+
+/// Diagonal band of vertical half-extent `half` from corner to corner, drawn per pixel column so it stays inside `r`.
+fn diagonal(r: Rect, rising: bool, half: f32, c: Color) {
+    for i in 0..r.w as i32 {
+        let x = i as f32 + 0.5;
+        let center = if rising { r.h - x * r.h / r.w } else { x * r.h / r.w };
+        let (y0, y1) = ((center - half).max(0.0), (center + half).min(r.h));
+        if y1 > y0 {
+            draw_rectangle(r.x + i as f32, r.y + y0, 1.0, y1 - y0, c);
+        }
+    }
+}
+
+fn draw_flag(lang: Lang, r: Rect) {
+    let stripes = |cols: [Color; 3], w: [f32; 3]| {
+        let mut y = r.y;
+        for (c, f) in cols.into_iter().zip(w) {
+            draw_rectangle(r.x, y, r.w, r.h * f, c);
+            y += r.h * f;
+        }
+    };
+    match lang {
+        Lang::De => stripes([BLACK, Color::new(0.87, 0.0, 0.0, 1.0), Color::new(1.0, 0.81, 0.0, 1.0)], [1.0 / 3.0; 3]),
+        Lang::Es => stripes([Color::new(0.78, 0.07, 0.13, 1.0), Color::new(1.0, 0.77, 0.0, 1.0), Color::new(0.78, 0.07, 0.13, 1.0)], [0.25, 0.5, 0.25]),
+        Lang::En => {
+            let red = Color::new(0.8, 0.07, 0.17, 1.0);
+            draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.0, 0.14, 0.49, 1.0));
+            for rising in [false, true] {
+                diagonal(r, rising, r.h * 0.2, WHITE);
+                diagonal(r, rising, r.h * 0.08, red);
+            }
+            draw_rectangle(r.x, r.y + r.h * 0.5 - r.h * 0.17, r.w, r.h * 0.34, WHITE);
+            draw_rectangle(r.x + r.w * 0.5 - r.h * 0.17, r.y, r.h * 0.34, r.h, WHITE);
+            draw_rectangle(r.x, r.y + r.h * 0.5 - r.h * 0.1, r.w, r.h * 0.2, red);
+            draw_rectangle(r.x + r.w * 0.5 - r.h * 0.1, r.y, r.h * 0.2, r.h, red);
+        }
+    }
+}
+
+/// A language flag as a button; the selected one is framed, the others are dimmed until hovered. Returns a click.
+pub fn flag_button(r: Rect, lang: Lang, selected: bool) -> bool {
+    let hover = hovered(r);
+    round_rect(r, 8.0, if selected { FOCUS } else { INK });
+    let inner = inset(r, 3.0);
+    draw_flag(lang, inner);
+    if !selected && !hover {
+        draw_rectangle(inner.x, inner.y, inner.w, inner.h, Color::new(1.0, 1.0, 1.0, 0.5));
+    }
+    clicked(r)
 }
 
 // ---- loading screen ---------------------------------------------------------------------------------------------
