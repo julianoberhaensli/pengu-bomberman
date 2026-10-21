@@ -1,7 +1,12 @@
 //! Relay server for online Bomber Pengu matches: `bomberpengu-server [--listen ADDR:PORT]`.
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use bomberpengu::server::{run, DEFAULT_PORT};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let addr = args

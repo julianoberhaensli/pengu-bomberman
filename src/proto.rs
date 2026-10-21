@@ -9,6 +9,33 @@ use std::io::{self, BufRead};
 /// `Connector.versionNr`
 pub const VERSION: &str = "1.1.0.spika";
 pub const MAX_FRAME: usize = 4096;
+pub const MAX_NAME_CHARS: usize = 20;
+pub const MAX_CHAT_CHARS: usize = 200;
+
+/// Names end up in attributes and are compared by clients; keep them plain.
+pub fn valid_name(name: &str) -> bool {
+    let n = name.chars().count();
+    (1..=MAX_NAME_CHARS).contains(&n)
+        && name == name.trim()
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+}
+
+/// `Util.cleanMsg` plus a length limit.
+pub fn clean_chat(msg: &str) -> String {
+    let s: String = msg
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| match c {
+            '"' => '\'',
+            '&' => '+',
+            '<' | '[' => '(',
+            '>' | ']' => ')',
+            c => c,
+        })
+        .take(MAX_CHAT_CHARS)
+        .collect();
+    s.trim().to_string()
+}
 
 /// Position and key state (`[left, up, right, down]` as four `0`/`1` characters) attached to game messages.
 #[derive(Clone, Debug, PartialEq, Eq)]

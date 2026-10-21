@@ -9,6 +9,7 @@ pub mod netgame;
 pub mod player;
 pub mod proto;
 pub mod rng;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod world;
 pub mod xml;

@@ -288,7 +288,7 @@ impl Lobby {
 
     /// `Connector.sendChatMsg`: cleaned text and the message to use for the current context.
     pub fn chat_message(&self, text: &str) -> Option<Msg> {
-        let msg = crate::server::clean_chat(text);
+        let msg = crate::proto::clean_chat(text);
         if msg.is_empty() {
             return None;
         }

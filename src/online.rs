@@ -2,12 +2,12 @@
 //! `Game` and `AfterMatch` frames).
 
 use crate::assets::Assets;
-use crate::{apply_keys, button_rect, clicked, draw_game, text, text_centered, AGAIN_POS, INK, MENU_POS, STEP};
+use crate::ui::{self, clip, drain_chars, panel, text, text_centered, Field, Style, ERROR, INK};
+use crate::{apply_keys, draw_game, game_bar, P1_BOMB, P1_DIRS, P2_BOMB, P2_DIRS, SOLO_HINT, STEP};
 use bomberpengu::lobby::{Entry, Lobby, LobbyEvent, Reaction};
 use bomberpengu::net::{Connection, NetEvent};
 use bomberpengu::netgame::{NetMatch, NetOutcome, NetPhase};
-use bomberpengu::proto::Msg;
-use bomberpengu::server::valid_name;
+use bomberpengu::proto::{valid_name, Msg};
 use bomberpengu::world::Event;
 use macroquad::prelude::*;
 
@@ -16,6 +16,17 @@ const LIST_TOP: f32 = 142.0;
 const VISIBLE_ROWS: usize = 9;
 const CHAT_LINES: usize = 7;
 const MAX_ADDR_CHARS: usize = 64;
+const MAX_CHAT_INPUT: usize = 200;
+
+const NAME_FIELD: Rect = Rect { x: 90.0, y: 240.0, w: 460.0, h: 38.0 };
+const SERVER_FIELD: Rect = Rect { x: 90.0, y: 310.0, w: 460.0, h: 38.0 };
+const CHAT_FIELD: Rect = Rect { x: 40.0, y: 532.0, w: 560.0, h: 28.0 };
+const CONNECT_BTN: Rect = Rect { x: 90.0, y: 372.0, w: 220.0, h: 46.0 };
+const BACK_BTN: Rect = Rect { x: 330.0, y: 372.0, w: 220.0, h: 46.0 };
+const CANCEL_BTN: Rect = Rect { x: 220.0, y: 380.0, w: 200.0, h: 46.0 };
+const ACT_BTN: Rect = Rect { x: 40.0, y: 570.0, w: 180.0, h: 36.0 };
+const ALL_BTN: Rect = Rect { x: 230.0, y: 570.0, w: 190.0, h: 36.0 };
+const LEAVE_BTN: Rect = Rect { x: 430.0, y: 570.0, w: 170.0, h: 36.0 };
 
 enum Stage {
     Form,
@@ -27,16 +38,17 @@ enum Stage {
 
 pub struct Online {
     stage: Stage,
-    name: String,
-    server: String,
+    name: Field,
+    server: Field,
     edit_server: bool,
     status: String,
     conn: Option<Connection>,
     lobby: Lobby,
-    chat_input: String,
+    chat_input: Field,
     selected: usize,
     acc: f64,
     surrendered: bool,
+    after_since: f64,
     /// Test aids for scripted runs: challenge this player / accept every challenge automatically.
     pub auto_challenge: Option<String>,
     pub auto_accept: bool,
@@ -44,31 +56,6 @@ pub struct Online {
 
 fn wall_ms() -> i64 {
     (get_time() * 1000.0) as i64
-}
-
-fn clip(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
-}
-
-fn drain_chars() {
-    while get_char_pressed().is_some() {}
-}
-
-/// Appends typed characters to `field` (and handles Backspace).
-fn edit(field: &mut String, max: usize) {
-    while let Some(c) = get_char_pressed() {
-        if !c.is_control() && field.chars().count() < max {
-            field.push(c);
-        }
-    }
-    if is_key_pressed(KeyCode::Backspace) {
-        field.pop();
-    }
-}
-
-fn panel(x: f32, y: f32, w: f32, h: f32) {
-    draw_rectangle(x, y, w, h, Color::new(0.93, 0.97, 1.0, 0.92));
-    draw_rectangle_lines(x, y, w, h, 4.0, INK);
 }
 
 fn status_color(e: &Entry) -> Color {
@@ -86,28 +73,34 @@ impl Online {
         drain_chars();
         Self {
             stage: Stage::Form,
-            name: name.to_string(),
-            server: server.to_string(),
+            name: crate::name_field(name),
+            server: Field::new(server, MAX_ADDR_CHARS, ui::any_char),
             edit_server: false,
             status: String::new(),
             conn: None,
             lobby: Lobby::new(name),
-            chat_input: String::new(),
+            chat_input: Field::new("", MAX_CHAT_INPUT, ui::any_char),
             selected: 0,
             acc: 0.0,
             surrendered: false,
+            after_since: 0.0,
             auto_challenge: None,
             auto_accept: false,
         }
     }
 
+    pub fn name(&self) -> &str {
+        &self.name.text
+    }
+
     pub fn connect(&mut self) {
-        if !valid_name(&self.name) {
+        let name = self.name.text.trim().to_string();
+        if !valid_name(&name) {
             self.status = "Ungueltiger Name (1-20 Zeichen: Buchstaben, Ziffern, Leerzeichen, _ - .)".into();
             return;
         }
-        self.lobby = Lobby::new(&self.name);
-        self.conn = Some(Connection::connect(&self.server, &self.name));
+        self.lobby = Lobby::new(&name);
+        self.conn = Some(Connection::connect(&self.server.text, &name));
         self.status = "Verbinde...".into();
         self.stage = Stage::Connecting;
     }
@@ -204,40 +197,46 @@ impl Online {
         if is_key_pressed(KeyCode::Tab) {
             self.edit_server = !self.edit_server;
         }
-        let (field, max) = if self.edit_server { (&mut self.server, MAX_ADDR_CHARS) } else { (&mut self.name, 20) };
-        edit(field, max);
-        if is_key_pressed(KeyCode::Enter) {
-            self.connect();
+        if ui::clicked(NAME_FIELD) {
+            self.edit_server = false;
+        } else if ui::clicked(SERVER_FIELD) {
+            self.edit_server = true;
         }
-        let a = &self.name;
+        if self.edit_server {
+            self.server.update(SERVER_FIELD);
+        } else {
+            self.name.update(NAME_FIELD);
+        }
         draw_rectangle(0.0, 0.0, 640.0, 640.0, Color::new(0.75, 0.88, 1.0, 1.0));
         panel(60.0, 120.0, 520.0, 380.0);
-        text_centered("Online spielen", 320.0, 180.0, 44.0, INK);
-        let rows = [("Name", a.as_str(), !self.edit_server), ("Server (Adresse:Port)", self.server.as_str(), self.edit_server)];
-        for (i, (label, value, active)) in rows.iter().enumerate() {
-            let y = 230.0 + i as f32 * 90.0;
-            text(label, 90.0, y, 20.0, INK);
-            draw_rectangle(90.0, y + 10.0, 460.0, 34.0, WHITE);
-            draw_rectangle_lines(90.0, y + 10.0, 460.0, 34.0, if *active { 4.0 } else { 2.0 }, INK);
-            let cursor = if *active && (get_time() * 2.0) as i64 % 2 == 0 { "|" } else { "" };
-            text(&format!("{value}{cursor}"), 98.0, y + 34.0, 24.0, INK);
-        }
-        text("Tab: Feld wechseln    Enter: verbinden    Esc: zurueck", 90.0, 440.0, 18.0, INK);
+        text_centered("Online-Lobby", 320.0, 180.0, 44.0, INK);
+        text("Name", 90.0, 230.0, 20.0, INK);
+        ui::draw_field(NAME_FIELD, &self.name, !self.edit_server);
+        text("Server (Adresse:Port)", 90.0, 300.0, 20.0, INK);
+        ui::draw_field(SERVER_FIELD, &self.server, self.edit_server);
+        let connect = ui::button(CONNECT_BTN, "Verbinden", Style::Primary, true);
+        let back = ui::button(BACK_BTN, "Zurueck", Style::Normal, true);
+        text_centered("Tab: Feld wechseln    Enter: verbinden    Esc: zurueck", 320.0, 446.0, 16.0, INK);
         if !self.status.is_empty() {
-            text(&clip(&self.status, 60), 90.0, 475.0, 20.0, Color::new(0.75, 0.1, 0.05, 1.0));
+            text(&clip(&self.status, 60), 90.0, 478.0, 18.0, ERROR);
+        }
+        if back {
+            return false;
+        }
+        if connect || is_key_pressed(KeyCode::Enter) {
+            self.connect();
         }
         true
     }
 
     fn frame_connecting(&mut self) -> bool {
-        if is_key_pressed(KeyCode::Escape) {
+        draw_rectangle(0.0, 0.0, 640.0, 640.0, Color::new(0.75, 0.88, 1.0, 1.0));
+        text_centered(&format!("Verbinde mit {} ...", clip(&self.server.text, 40)), 320.0, 320.0, 28.0, INK);
+        if ui::button(CANCEL_BTN, "Abbrechen", Style::Normal, true) || is_key_pressed(KeyCode::Escape) {
             self.conn = None;
             self.status.clear();
             self.stage = Stage::Form;
         }
-        draw_rectangle(0.0, 0.0, 640.0, 640.0, Color::new(0.75, 0.88, 1.0, 1.0));
-        text_centered(&format!("Verbinde mit {} ...", clip(&self.server, 40)), 320.0, 320.0, 28.0, INK);
-        text_centered("Esc: abbrechen", 320.0, 360.0, 18.0, INK);
         true
     }
 
@@ -257,8 +256,21 @@ impl Online {
         }
     }
 
+    /// Label and availability of the room's main button for the selected player.
+    fn action_button(&self) -> (&'static str, bool) {
+        match self.lobby.players.get(self.selected) {
+            Some(p) if !p.me => match p.code() {
+                "0" | "3" => ("Herausfordern", true),
+                "1" => ("Annehmen", true),
+                "2" | "23" => ("Zurueckziehen", true),
+                _ => ("Herausfordern", false),
+            },
+            _ => ("Herausfordern", false),
+        }
+    }
+
     fn frame_room(&mut self, a: &Assets) -> bool {
-        if is_key_pressed(KeyCode::Escape) {
+        if is_key_pressed(KeyCode::Escape) || ui::clicked(LEAVE_BTN) {
             self.disconnect("");
             self.status.clear();
             return true;
@@ -286,15 +298,18 @@ impl Online {
         if is_key_pressed(KeyCode::Up) {
             self.selected = self.selected.saturating_sub(1);
         }
-        if is_key_pressed(KeyCode::F2) {
+        if is_key_pressed(KeyCode::F2) || ui::clicked(ALL_BTN) {
             let m = self.lobby.toggle_challenge_all();
             self.send_all(m);
         }
-        edit(&mut self.chat_input, 200);
+        if ui::clicked(ACT_BTN) && self.action_button().1 {
+            self.act_on_selected(a);
+        }
+        self.chat_input.update(CHAT_FIELD);
         if is_key_pressed(KeyCode::Enter) {
-            if self.chat_input.trim().is_empty() {
+            if self.chat_input.text.trim().is_empty() {
                 self.act_on_selected(a);
-            } else if let Some(m) = self.lobby.chat_message(&self.chat_input) {
+            } else if let Some(m) = self.lobby.chat_message(&self.chat_input.text) {
                 self.send_all(vec![m]);
                 self.chat_input.clear();
             }
@@ -321,7 +336,7 @@ impl Online {
         draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
         panel(30.0, 30.0, 580.0, 580.0);
         text_centered("Spielerraum", 320.0, 76.0, 38.0, INK);
-        text(&format!("{} auf {}", self.lobby.my_name, clip(&self.server, 40)), 48.0, 100.0, 16.0, INK);
+        text(&format!("{} auf {}", self.lobby.my_name, clip(&self.server.text, 40)), 48.0, 100.0, 16.0, INK);
         text("Spieler", 66.0, 134.0, 16.0, INK);
         text("G/V/U", 330.0, 134.0, 16.0, INK);
         let first = self.first_row();
@@ -355,20 +370,19 @@ impl Online {
             }
         }
         // chat
-        draw_rectangle(40.0, 372.0, 560.0, 170.0, WHITE);
-        draw_rectangle_lines(40.0, 372.0, 560.0, 170.0, 2.0, INK);
+        draw_rectangle(40.0, 362.0, 560.0, 162.0, WHITE);
+        draw_rectangle_lines(40.0, 362.0, 560.0, 162.0, 2.0, INK);
         let start = self.lobby.chat.len().saturating_sub(CHAT_LINES);
         for (i, (n, m)) in self.lobby.chat[start..].iter().enumerate() {
-            text(&clip(&format!("{n}: {m}"), 64), 48.0, 392.0 + i as f32 * 23.0, 17.0, INK);
+            text(&clip(&format!("{n}: {m}"), 64), 48.0, 381.0 + i as f32 * 23.0, 17.0, INK);
         }
-        draw_rectangle(40.0, 550.0, 560.0, 28.0, WHITE);
-        draw_rectangle_lines(40.0, 550.0, 560.0, 28.0, 2.0, INK);
-        let cursor = if (get_time() * 2.0) as i64 % 2 == 0 { "|" } else { "" };
-        let shown: String = self.chat_input.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
-        text(&format!("{shown}{cursor}"), 48.0, 570.0, 18.0, INK);
-        text("Enter: Aktion / senden   Hoch/Runter: waehlen   F2: alle herausfordern   Esc: trennen", 40.0, 598.0, 14.0, INK);
+        ui::draw_field(CHAT_FIELD, &self.chat_input, true);
+        let (label, enabled) = self.action_button();
+        ui::draw_button(ACT_BTN, label, Style::Primary, enabled, false);
+        ui::draw_button(ALL_BTN, if self.lobby.challenged_all { "Alle zurueckziehen" } else { "Alle herausfordern" }, Style::Normal, true, false);
+        ui::draw_button(LEAVE_BTN, "Trennen", Style::Normal, true, false);
         if !self.status.is_empty() {
-            text(&clip(&self.status, 60), 48.0, 118.0, 16.0, Color::new(0.75, 0.1, 0.05, 1.0));
+            text(&clip(&self.status, 60), 48.0, 118.0, 16.0, ERROR);
         }
     }
 
@@ -377,15 +391,10 @@ impl Online {
     fn frame_match(&mut self, a: &Assets) -> bool {
         let mut out: Vec<Msg> = Vec::new();
         let mut finished = None;
-        let esc = is_key_pressed(KeyCode::Escape) && !self.surrendered;
-        if esc {
-            self.surrendered = true;
-            out.push(Msg::Surrender(None));
-        }
+        let mut surrender = is_key_pressed(KeyCode::Escape);
         if let Stage::Match(nm) = &mut self.stage {
             if nm.accepts_input() {
-                let keys = [KeyCode::Left, KeyCode::Up, KeyCode::Right, KeyCode::Down];
-                apply_keys(nm.local_player_mut(), keys, KeyCode::Space);
+                apply_keys(nm.local_player_mut(), &[P1_DIRS, P2_DIRS], &[P1_BOMB, P2_BOMB]);
             }
             while self.acc >= STEP {
                 self.acc -= STEP;
@@ -403,25 +412,31 @@ impl Online {
             if nm.phase == NetPhase::Finished {
                 finished = nm.outcome;
             }
-            Self::draw_match(a, nm, &self.lobby);
+            surrender |= Self::draw_match(a, nm, &self.lobby);
+        }
+        if surrender && !self.surrendered {
+            self.surrendered = true;
+            out.push(Msg::Surrender(None));
         }
         self.send_all(out);
         if let Some(o) = finished {
             self.stage = Stage::After(o);
+            self.after_since = get_time();
             self.acc = 0.0;
         }
         true
     }
 
-    fn draw_match(a: &Assets, nm: &NetMatch, lobby: &Lobby) {
+    /// Draws the match; `true` = the surrender button was clicked.
+    fn draw_match(a: &Assets, nm: &NetMatch, lobby: &Lobby) -> bool {
         if !nm.ready {
             draw_texture(&a.bg_game, 0.0, 0.0, WHITE);
             text_centered("Warte auf Gegner...", 360.0, 250.0, 34.0, INK);
-            return;
+            return game_bar(a, SOLO_HINT, "Aufgeben (Esc)");
         }
         let tag = |i: usize| format!("{}{}", clip(&nm.names[i], 14), if i == nm.me { " (du)" } else { "" });
         let (n0, n1) = (tag(0), tag(1));
-        draw_game(a, &nm.world, [&n0, &n1], "Esc: Aufgeben");
+        let surrender = draw_game(a, &nm.world, [&n0, &n1], SOLO_HINT, "Aufgeben (Esc)");
         for i in 0..2 {
             let y0 = if i == 0 { 48.0 } else { 213.0 };
             let (ping, fps) = if i == nm.me { (nm.my_ping, nm.my_fps) } else { (nm.remote_ping, nm.remote_fps) };
@@ -431,6 +446,7 @@ impl Online {
         for (i, (n, m)) in lobby.chat[start..].iter().enumerate() {
             text(&clip(&format!("{n}: {m}"), 56), 110.0, 490.0 + i as f32 * 20.0, 16.0, INK);
         }
+        surrender
     }
 
     // ---- result --------------------------------------------------------------------------------------------------
@@ -439,18 +455,6 @@ impl Online {
         let Stage::After(outcome) = self.stage else { return true };
         let opp = self.lobby.opponent.clone();
         let opp_here = opp.as_ref().is_some_and(|o| self.lobby.find(o).is_some());
-        if (is_key_pressed(KeyCode::Enter) || clicked(button_rect(&a.play_again, AGAIN_POS.0, AGAIN_POS.1))) && opp_here {
-            let r = self.lobby.play_again();
-            self.react(a, r);
-        } else if is_key_pressed(KeyCode::Escape) || clicked(button_rect(&a.to_menu, MENU_POS.0, MENU_POS.1)) {
-            let m = self.lobby.leave_match();
-            self.send_all(vec![m]);
-            self.stage = Stage::Room;
-            return true;
-        }
-        if !matches!(self.stage, Stage::After(_)) {
-            return true;
-        }
         draw_texture(&a.bg_after, 0.0, 0.0, WHITE);
         panel(60.0, 40.0, 520.0, 440.0);
         text_centered("Ergebnis", 320.0, 95.0, 40.0, INK);
@@ -470,13 +474,18 @@ impl Online {
             "und jetzt? Entscheiden Sie...".to_string()
         };
         text_centered(&note, 320.0, 330.0, 26.0, INK);
-        a.play_again.draw(0, AGAIN_POS.0, AGAIN_POS.1);
-        let r = button_rect(&a.to_menu, MENU_POS.0, MENU_POS.1);
-        draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.75, 0.1, 0.05, 1.0));
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, INK);
-        text_centered("ZUM RAUM", r.x + r.w / 2.0, r.y + r.h - 8.0, 22.0, WHITE);
-        text("Enter: Nochmal Spielen", 100.0, 468.0, 18.0, INK);
-        text("Esc: Zurueck zum Raum", 380.0, 468.0, 18.0, INK);
+        text_centered("Enter: nochmal spielen    Esc: zurueck zum Raum", 320.0, 462.0, 16.0, INK);
+        let (again, back) = ui::after_buttons(opp_here, "Zum Raum");
+        // Enter doubles as a bomb key, so it is ignored for a moment after the match
+        let enter = is_key_pressed(KeyCode::Enter) && get_time() - self.after_since > 0.7;
+        if (again || enter) && opp_here {
+            let r = self.lobby.play_again();
+            self.react(a, r);
+        } else if back || is_key_pressed(KeyCode::Escape) {
+            let m = self.lobby.leave_match();
+            self.send_all(vec![m]);
+            self.stage = Stage::Room;
+        }
         true
     }
 }

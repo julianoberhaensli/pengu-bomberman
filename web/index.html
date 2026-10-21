@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <title>Bomber Pengu</title>
+    <style>
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #222; overflow: hidden; }
+        body { display: flex; align-items: center; justify-content: center; }
+        canvas { width: 640px; height: 640px; max-width: 100vw; max-height: 100vh; outline: none; }
+    </style>
+</head>
+<body>
+    <canvas id="glcanvas" tabindex="1" width="640" height="640"></canvas>
+    <script src="gl.js"></script>
+    <script src="audio.js"></script>
+    <script src="bp_net.js"></script>
+    <script>load("bomberpengu.wasm");</script>
+</body>
+</html>

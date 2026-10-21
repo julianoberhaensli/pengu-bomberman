@@ -13,6 +13,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tungstenite::protocol::WebSocketConfig;
+use tungstenite::Message;
 
 pub const DEFAULT_PORT: u16 = 6900;
 pub const MAX_PLAYERS: usize = 100;
@@ -21,34 +23,9 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Two deaths this close together are a draw (the second player died before the first `die` reached it).
 pub const DRAW_WINDOW: Duration = Duration::from_millis(1500);
-pub const MAX_NAME_CHARS: usize = 20;
-pub const MAX_CHAT_CHARS: usize = 200;
 const MAX_MSGS_PER_SECOND: u32 = 300;
-
-/// Names end up in attributes and are compared by clients; keep them plain.
-pub fn valid_name(name: &str) -> bool {
-    let n = name.chars().count();
-    (1..=MAX_NAME_CHARS).contains(&n)
-        && name == name.trim()
-        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
-}
-
-/// `Util.cleanMsg` plus a length limit.
-pub fn clean_chat(msg: &str) -> String {
-    let s: String = msg
-        .chars()
-        .filter(|c| !c.is_control())
-        .map(|c| match c {
-            '"' => '\'',
-            '&' => '+',
-            '<' | '[' => '(',
-            '>' | ']' => ')',
-            c => c,
-        })
-        .take(MAX_CHAT_CHARS)
-        .collect();
-    s.trim().to_string()
-}
+/// How long a WebSocket connection waits for the socket before it looks at its outgoing queue again.
+const WS_POLL: Duration = Duration::from_millis(5);
 
 struct Client {
     tx: Sender<Vec<u8>>,
@@ -340,9 +317,20 @@ fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Native clients speak zero-terminated XML over TCP, browsers the same messages as WebSocket text on the same port.
 fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(AUTH_TIMEOUT));
+    let mut first = [0u8; 1];
+    // an HTTP upgrade request starts with `GET`, an XML frame with `<`
+    match stream.peek(&mut first) {
+        Ok(1) if first[0] == b'G' => serve_websocket(stream, state),
+        Ok(1) => serve_tcp(stream, state),
+        _ => {}
+    }
+}
+
+fn serve_tcp(stream: TcpStream, state: Arc<Mutex<State>>) {
     let Ok(write_half) = stream.try_clone() else { return };
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
     thread::spawn(move || {
@@ -355,8 +343,48 @@ fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>) {
         let _ = w.shutdown(Shutdown::Both);
     });
     let mut reader = BufReader::new(stream);
+    session(&state, tx, |timeout| {
+        let _ = reader.get_ref().set_read_timeout(Some(timeout));
+        read_frame(&mut reader, MAX_FRAME).ok().flatten()
+    });
+}
 
-    let auth = read_frame(&mut reader, MAX_FRAME).ok().flatten().and_then(|f| Msg::from_xml(&f));
+fn serve_websocket(stream: TcpStream, state: Arc<Mutex<State>>) {
+    let config = WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME));
+    let Ok(mut ws) = tungstenite::accept_with_config(stream, Some(config)) else { return };
+    let _ = ws.get_ref().set_read_timeout(Some(WS_POLL));
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+    // one thread owns the socket, so outgoing frames are sent between short reads
+    let to_text = |frame: Vec<u8>| Message::text(String::from_utf8_lossy(&frame).trim_end_matches(['\n', '\0']).to_string());
+    session(&state, tx, |timeout| {
+        let deadline = Instant::now() + timeout;
+        loop {
+            for frame in rx.try_iter() {
+                ws.send(to_text(frame)).ok()?;
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match ws.read() {
+                Ok(Message::Text(t)) => return Some(t.as_str().to_string()),
+                Ok(Message::Close(_)) => return None,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(_) => return None,
+            }
+        }
+    });
+    for frame in rx.try_iter() {
+        let _ = ws.send(to_text(frame));
+    }
+    let _ = ws.close(None);
+    let _ = ws.flush();
+}
+
+/// Authenticates, then relays messages until the client is gone. `recv` returns the next message or `None` when the
+/// connection ended or nothing arrived within the given time.
+fn session(state: &Mutex<State>, tx: Sender<Vec<u8>>, mut recv: impl FnMut(Duration) -> Option<String>) {
+    let auth = recv(AUTH_TIMEOUT).and_then(|f| Msg::from_xml(&f));
     let name = match auth {
         Some(Msg::Auth { name, version, .. }) if version == VERSION => name,
         Some(Msg::Auth { .. }) => {
@@ -365,16 +393,15 @@ fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>) {
         }
         _ => return,
     };
-    if let Err(e) = lock(&state).join(&name, tx.clone()) {
+    if let Err(e) = lock(state).join(&name, tx.clone()) {
         let _ = tx.send(Msg::ErrorMsg(e).to_frame());
         return;
     }
     drop(tx);
-    let _ = reader.get_ref().set_read_timeout(Some(IDLE_TIMEOUT));
 
     let mut window_start = Instant::now();
     let mut count = 0u32;
-    while let Ok(Some(frame)) = read_frame(&mut reader, MAX_FRAME) {
+    while let Some(frame) = recv(IDLE_TIMEOUT) {
         if window_start.elapsed() >= Duration::from_secs(1) {
             window_start = Instant::now();
             count = 0;
@@ -384,10 +411,10 @@ fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>) {
             break;
         }
         if let Some(m) = Msg::from_xml(&frame) {
-            lock(&state).handle(&name, m, Instant::now());
+            lock(state).handle(&name, m, Instant::now());
         }
     }
-    lock(&state).leave(&name);
+    lock(state).leave(&name);
 }
 
 pub struct ServerHandle {
