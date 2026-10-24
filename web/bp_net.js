@@ -16,6 +16,7 @@
     function pageServer() {
         const q = new URLSearchParams(location.search).get("server");
         if (q) return q;
+        if (window.BP_DEFAULT_SERVER) return window.BP_DEFAULT_SERVER;
         const tls = location.protocol === "https:";
         return (tls ? "wss://" + location.host : "ws://" + location.hostname + ":6900");
     }

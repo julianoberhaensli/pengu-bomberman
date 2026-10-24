@@ -52,6 +52,7 @@ impl Match {
                 }
             }
             Phase::GameOver => {
+                self.world.advance_death_anims();
                 self.world.update_objects();
                 self.world.now += crate::world::DT_MS;
                 self.over_counter += 1;

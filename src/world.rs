@@ -165,6 +165,13 @@ impl World {
         }
     }
 
+    /// Players are frozen in game over, but a dead penguin keeps playing its death clip.
+    pub fn advance_death_anims(&mut self) {
+        for p in self.players.iter_mut().filter(|p| p.dead) {
+            p.anim_ticks += 1;
+        }
+    }
+
     pub fn update_objects(&mut self) {
         for i in 0..self.bombs.len() {
             self.update_bomb(i);

@@ -142,6 +142,7 @@ impl NetMatch {
                 self.send_key_msg(wall_ms);
             }
             NetPhase::GameOver => {
+                self.world.advance_death_anims();
                 self.world.update_objects();
                 self.world.now += DT_MS;
                 self.flush_outgoing();
