@@ -10,6 +10,7 @@ use crate::world::{World, BOMB_FUSE_MS, DT_MS};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 #[cfg(test)]
@@ -506,10 +507,14 @@ struct DeadlineStream {
     inner: TcpStream,
     deadline: Instant,
     poll: Option<Duration>,
+    prefix: io::Cursor<Vec<u8>>,
 }
 
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.prefix.position() < self.prefix.get_ref().len() as u64 {
+            return self.prefix.read(buf);
+        }
         let remaining = self.deadline.checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
             .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
@@ -530,16 +535,22 @@ impl Write for DeadlineStream {
     }
 }
 
-fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>) {
+fn serve_connection(stream: TcpStream, state: Arc<Mutex<State>>, web_root: Option<&Path>) {
     let deadline = Instant::now() + AUTH_TIMEOUT;
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(AUTH_TIMEOUT));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut first = [0u8; 1];
-    // an HTTP upgrade request starts with `GET`, an XML frame with `<`
-    match stream.peek(&mut first) {
-        Ok(1) if first[0] == b'G' => serve_websocket(DeadlineStream { inner: stream, deadline, poll: None }, state),
-        Ok(1) => serve_tcp(DeadlineStream { inner: stream, deadline, poll: None }, state),
+    let mut stream = DeadlineStream { inner: stream, deadline, poll: None, prefix: io::Cursor::new(Vec::new()) };
+    match stream.inner.peek(&mut first) {
+        Ok(1) if first[0] != b'<' && web_root.is_some() => {
+            if let Ok(Some(prefix)) = crate::http::route(&mut stream, web_root.unwrap()) {
+                stream.prefix = io::Cursor::new(prefix);
+                serve_websocket(stream, state);
+            }
+        }
+        Ok(1) if first[0] == b'G' => serve_websocket(stream, state),
+        Ok(1) => serve_tcp(stream, state),
         _ => {}
     }
 }
@@ -696,7 +707,7 @@ impl Drop for ConnectionPermit {
     }
 }
 
-fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>) {
+fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, web_root: Option<PathBuf>) {
     let state = Arc::new(Mutex::new(State::default()));
     let counts = Arc::new(Mutex::new(HashMap::new()));
     for conn in listener.incoming() {
@@ -707,9 +718,10 @@ fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>) {
             let Ok(peer) = stream.peer_addr() else { continue };
             let Some(permit) = ConnectionPermit::acquire(&counts, peer.ip()) else { continue };
             let st = state.clone();
+            let root = web_root.clone();
             let _ = thread::Builder::new().spawn(move || {
                 let _permit = permit;
-                serve_connection(stream, st);
+                serve_connection(stream, st, root.as_deref());
             });
         }
     }
@@ -721,15 +733,42 @@ pub fn spawn(addr: impl ToSocketAddrs) -> io::Result<ServerHandle> {
     let addr = listener.local_addr()?;
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
-    thread::spawn(move || accept_loop(listener, s));
+    thread::spawn(move || accept_loop(listener, s, None));
     Ok(ServerHandle { addr, stop })
 }
 
 /// Runs the server on the calling thread.
 pub fn run(addr: impl ToSocketAddrs) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
-    accept_loop(listener, Arc::new(AtomicBool::new(false)));
+    println!("Bomber Pengu relay listening on {} (no encryption, no passwords)", listener.local_addr()?);
+    accept_loop(listener, Arc::new(AtomicBool::new(false)), None);
     Ok(())
+}
+
+pub fn spawn_with_web_root(addr: impl ToSocketAddrs, root: impl AsRef<Path>) -> io::Result<ServerHandle> {
+    let root = checked_web_root(root.as_ref())?;
+    let listener = TcpListener::bind(addr)?;
+    let addr = listener.local_addr()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let signal = stop.clone();
+    thread::spawn(move || accept_loop(listener, signal, Some(root)));
+    Ok(ServerHandle { addr, stop })
+}
+
+pub fn run_with_web_root(addr: impl ToSocketAddrs, root: impl AsRef<Path>) -> io::Result<()> {
+    let root = checked_web_root(root.as_ref())?;
+    let listener = TcpListener::bind(addr)?;
+    println!("Bomber Pengu web server listening on {}", listener.local_addr()?);
+    accept_loop(listener, Arc::new(AtomicBool::new(false)), Some(root));
+    Ok(())
+}
+
+fn checked_web_root(root: &Path) -> io::Result<PathBuf> {
+    let root = root.canonicalize()?;
+    if !root.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "web root must be a directory"));
+    }
+    Ok(root)
 }
 
 #[cfg(test)]
@@ -1173,7 +1212,7 @@ mod tests {
         let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (inner, _) = listener.accept().unwrap();
         peer.write_all(b"partial frame").unwrap();
-        let mut stream = DeadlineStream { inner, deadline: Instant::now(), poll: None };
+        let mut stream = DeadlineStream { inner, deadline: Instant::now(), poll: None, prefix: io::Cursor::new(Vec::new()) };
         assert_eq!(stream.read(&mut [0; 1]).unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 }

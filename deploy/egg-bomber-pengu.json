@@ -1,0 +1,31 @@
+{
+    "_comment": "Import into Pterodactyl 1.x after replacing the image placeholder with your published combined image.",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-10-24T00:00:00+00:00",
+    "name": "Bomber Pengu - Web + Relay",
+    "author": "deploy@example.org",
+    "description": "Browser game and relay in one image. Publish your Dockerfile build and replace ghcr.io/OWNER/REPO-server:latest. Uses the primary allocation for HTTP and /ws. Put an HTTPS reverse proxy in front for public play. No files need installing in /home/container.",
+    "features": null,
+    "docker_images": {
+        "Bomber Pengu (replace OWNER/REPO)": "ghcr.io/OWNER/REPO-server:latest"
+    },
+    "file_denylist": [],
+    "startup": "/usr/local/bin/bomberpengu-server --web-root /srv/pengu",
+    "config": {
+        "files": "{}",
+        "startup": "{\"done\": \"Bomber Pengu web server listening on\"}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/ash\nset -eu\necho 'Browser assets and relay are included in the Docker image; no installation required.'\n",
+            "container": "alpine:3.22",
+            "entrypoint": "ash"
+        }
+    },
+    "variables": []
+}

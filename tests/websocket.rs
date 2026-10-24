@@ -3,11 +3,72 @@
 use bomberpengu::net::{Connection, NetEvent};
 use bomberpengu::proto::*;
 use bomberpengu::server;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
+
+#[test]
+fn rust_web_server_serves_files_and_websockets_on_one_port() {
+    let root = std::env::temp_dir().join(format!("pengu-web-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("index.html"), b"<canvas></canvas>").unwrap();
+    std::fs::write(root.join("bomberpengu.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    std::fs::write(root.join("assets/test.png"), [0, 255, 128, 42]).unwrap();
+    assert!(server::spawn_with_web_root("127.0.0.1:0", root.join("index.html")).is_err());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(std::env::current_dir().unwrap().join("Cargo.toml"), root.join("outside")).unwrap();
+    let srv = server::spawn_with_web_root("127.0.0.1:0", &root).unwrap();
+    let request = |method: &str, path: &str| {
+        let mut socket = TcpStream::connect(srv.addr).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).unwrap();
+        response
+    };
+    for (path, mime, body) in [
+        ("/", "text/html; charset=utf-8", b"<canvas></canvas>".as_slice()),
+        ("/bomberpengu.wasm?v=1", "application/wasm", b"\0asm\x01\0\0\0".as_slice()),
+        ("/assets/test.png", "image/png", [0, 255, 128, 42].as_slice()),
+    ] {
+        let response = request("GET", path);
+        let boundary = response.windows(4).position(|part| part == b"\r\n\r\n").unwrap() + 4;
+        let headers = std::str::from_utf8(&response[..boundary]).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(headers.contains(&format!("Content-Type: {mime}\r\n")));
+        assert!(headers.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert_eq!(&response[boundary..], body);
+    }
+    let head = String::from_utf8(request("HEAD", "/")).unwrap();
+    assert!(head.contains("Content-Length: 17\r\n"));
+    assert!(head.ends_with("\r\n\r\n"));
+    for path in ["/../Cargo.toml", "/%2e%2e/Cargo.toml", "/assets%5c..%5cCargo.toml", "/index.html:secret"] {
+        assert!(request("GET", path).starts_with(b"HTTP/1.1 403"), "{path}");
+    }
+    assert!(request("GET", "/missing").starts_with(b"HTTP/1.1 404"));
+    assert!(request("GET", "/assets/").starts_with(b"HTTP/1.1 404"));
+    #[cfg(unix)]
+    assert!(request("GET", "/outside").starts_with(b"HTTP/1.1 404"));
+    assert!(request("POST", "/").starts_with(b"HTTP/1.1 405"));
+    let config = String::from_utf8(request("GET", "/config.js")).unwrap();
+    assert!(config.contains("text/javascript; charset=utf-8"));
+    assert!(config.contains("location.host + '/ws'"));
+    assert!(config.contains("'wss://' : 'ws://'"));
+    let mut web = ws_connect(&format!("{}/ws", srv.addr), "Webby");
+    ws_expect(&mut web, "user list", |message| matches!(message, Msg::UserList(_)));
+    let root_web = ws_connect(&srv.addr.to_string(), "Root");
+    let native = Connection::connect(&srv.addr.to_string(), "Nat");
+    expect(&native, "user list", |message| matches!(message, Msg::UserList(list) if list.len() == 3));
+    drop(native);
+    drop(root_web);
+    drop(web);
+    srv.stop();
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 fn ws_connect(addr: &str, name: &str) -> Ws {
     let (mut ws, _) = tungstenite::connect(format!("ws://{addr}")).unwrap();

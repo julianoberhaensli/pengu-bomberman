@@ -3,6 +3,8 @@
 pub mod ai;
 pub mod game;
 pub mod grid;
+#[cfg(not(target_arch = "wasm32"))]
+mod http;
 pub mod i18n;
 pub mod lobby;
 pub mod net;

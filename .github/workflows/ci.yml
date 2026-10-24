@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -61,6 +63,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io

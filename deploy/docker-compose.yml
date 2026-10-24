@@ -1,11 +1,15 @@
-# On the server: set PENGU_IMAGE and PENGU_DOMAIN (e.g. in a .env file next to this file), then `docker compose up -d`.
-# Caddy obtains the TLS certificate automatically and proxies wss:// to the game server.
+# Set PENGU_DOMAIN in .env, then run `docker compose up -d --build`.
 services:
   server:
-    image: ${PENGU_IMAGE}
+    image: ${PENGU_IMAGE:-bomberpengu:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
     restart: unless-stopped
+    environment:
+      SERVER_PORT: "8080"
     ports:
-      - "127.0.0.1:6900:6900"   # raw TCP is local-only; public browsers use Caddy's TLS endpoint
+      - "127.0.0.1:8080:8080"
 
   caddy:
     image: caddy:2
@@ -13,11 +17,13 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    command: caddy reverse-proxy --from ${PENGU_DOMAIN} --to server:6900
+    command: ["caddy", "reverse-proxy", "--from", "${PENGU_DOMAIN:?Set PENGU_DOMAIN to your public hostname}", "--to", "server:8080"]
     volumes:
       - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       - server
 
 volumes:
   caddy_data:
+  caddy_config:
