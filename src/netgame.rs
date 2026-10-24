@@ -241,6 +241,9 @@ impl NetMatch {
 
     /// `Connector.onSockXML` for the in-game messages. Other messages are ignored.
     pub fn handle(&mut self, m: Msg, wall_ms: i64) {
+        if m.is_relay() && (!m.valid_gameplay() || self.phase == NetPhase::Finished) {
+            return;
+        }
         let r = self.remote();
         match m {
             Msg::Seed(s) => {
@@ -271,20 +274,24 @@ impl NetMatch {
                 Some(w) if w == self.names[r] => self.end_now(NetOutcome::Lose),
                 _ => self.end_now(NetOutcome::Draw),
             },
+            Msg::EndGame { winner } => {
+                let outcome = if winner == self.names[self.me] { NetOutcome::Win }
+                    else if winner == self.names[r] { NetOutcome::Lose }
+                    else { NetOutcome::Draw };
+                self.outcome = Some(outcome);
+                self.phase = NetPhase::Finished;
+            }
             Msg::PlayerLeft(n) if n == self.names[r] => self.end_now(NetOutcome::Win),
             _ if !self.ready => {}
             Msg::Move(c) => self.remote_cmd(&c),
             Msg::Bomb { cmd, cx, cy } => {
-                self.world.remote_place_bomb(cx, cy, r);
-                self.remote_cmd(&cmd);
+                if self.world.remote_place_bomb(cx, cy, r) { self.remote_cmd(&cmd); }
             }
             Msg::Pickup { cmd, cx, cy, speed, blast } => {
-                self.world.remote_pickup(cx, cy, r, speed, blast);
-                self.remote_cmd(&cmd);
+                if self.world.remote_pickup(cx, cy, r, speed, blast) { self.remote_cmd(&cmd); }
             }
             Msg::Kick { cmd, cx, cy, id, dx, dy, t } => {
-                self.world.remote_kick(cx, cy, r, dx, dy, t, id);
-                self.remote_cmd(&cmd);
+                if self.world.remote_kick(cx, cy, r, dx, dy, t, id) { self.remote_cmd(&cmd); }
             }
             Msg::Stop { cmd, cx, cy, id, t } => {
                 self.world.remote_stop(id, cx, cy, t);
@@ -536,6 +543,7 @@ mod tests {
     fn kicked_bomb_is_mirrored_and_its_detonation_is_announced_by_the_kicker() {
         let mut p = Pair::started(1);
         p.a.local_player_mut().kick = true;
+        p.b.world.players[0].kick = true;
         // a bomb in the cell right of a, a keeps walking into it
         for w in [&mut p.a.world, &mut p.b.world] {
             w.set_bomb(1, 0, 1);
@@ -582,6 +590,7 @@ mod tests {
         p.a.world.bombs[0].kicked = true;
         p.a.world.bombs[0].kicked_by = Some(0);
         p.a.world.bombs[0].dx = 0.1;
+        p.b.world.players[0].kick = true;
         p.b.world.remote_kick(8, 10, 0, 0.1, 0.0, 3000, 5000);
         p.run(100);
         let stop = p.sent_by_b.iter().find(|m| matches!(m, Msg::Stop { .. })).unwrap_or_else(|| {

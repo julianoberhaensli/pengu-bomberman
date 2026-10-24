@@ -4,6 +4,8 @@
 (function () {
     const KIND_MSG = 1, KIND_CLOSED = 2;
     const HEARTBEAT_MS = 15000;
+    const MAX_FRAME_BYTES = 65536;
+    const MAX_QUEUE = 256;
     const socks = new Map();
     let nextId = 1;
     const dec = new TextDecoder();
@@ -26,26 +28,51 @@
 
         env.bp_ws_open = function (ptr, len) {
             const id = nextId++;
-            const s = { ws: null, queue: [], opened: false, beat: 0 };
+            const s = { ws: null, queue: [], pending: [], opened: false, beat: 0, timer: 0 };
             socks.set(id, s);
             const closed = (why) => {
                 clearInterval(s.beat);
+                clearTimeout(s.timer);
+                s.pending.length = 0;
                 if (!s.done) {
                     s.done = true;
                     s.queue.push({ kind: KIND_CLOSED, data: enc.encode(why) });
                 }
             };
+            s.closed = closed;
             try {
                 const ws = new WebSocket(read(ptr, len));
                 s.ws = ws;
                 ws.onopen = () => {
+                    if (s.done) return;
                     s.opened = true;
+                    for (const text of s.pending) ws.send(text);
+                    s.pending.length = 0;
                     s.beat = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send("<beat/>"); }, HEARTBEAT_MS);
                 };
                 ws.onmessage = (e) => {
-                    if (typeof e.data === "string") s.queue.push({ kind: KIND_MSG, data: enc.encode(e.data) });
+                    if (s.done || typeof e.data !== "string") return;
+                    clearTimeout(s.timer);
+                    if (e.data.length > MAX_FRAME_BYTES || s.queue.length >= MAX_QUEUE) {
+                        s.queue.length = 0;
+                        closed("Servernachrichten zu gross");
+                        ws.close();
+                        return;
+                    }
+                    const data = enc.encode(e.data);
+                    if (data.length > MAX_FRAME_BYTES) {
+                        s.queue.length = 0;
+                        closed("Servernachrichten zu gross");
+                        ws.close();
+                        return;
+                    }
+                    s.queue.push({ kind: KIND_MSG, data });
                 };
                 ws.onclose = () => closed(s.opened ? "Verbindung getrennt" : "Verbindung fehlgeschlagen");
+                s.timer = setTimeout(() => {
+                    closed("Verbindung fehlgeschlagen");
+                    ws.close();
+                }, 10000);
             } catch (e) {
                 closed("Ungueltige Serveradresse");
             }
@@ -54,14 +81,27 @@
 
         env.bp_ws_send = function (id, ptr, len) {
             const s = socks.get(id);
-            if (!s || !s.ws) return;
+            if (!s || !s.ws || s.done) return;
+            if (len > MAX_FRAME_BYTES) {
+                s.closed("Nachricht zu gross");
+                s.ws.close();
+                return;
+            }
             const text = read(ptr, len);
             if (s.ws.readyState === WebSocket.OPEN) {
-                s.ws.send(text);
+                if (s.ws.bufferedAmount + len > MAX_FRAME_BYTES * MAX_QUEUE) {
+                    s.closed("Zu viele Nachrichten");
+                    s.ws.close();
+                } else {
+                    s.ws.send(text);
+                }
             } else if (s.ws.readyState === WebSocket.CONNECTING) {
-                // messages sent before the socket is up (the auth) go out as soon as it opens
-                const prev = s.ws.onopen;
-                s.ws.onopen = function (ev) { prev(ev); s.ws.send(text); };
+                if (s.pending.length >= MAX_QUEUE) {
+                    s.closed("Zu viele Nachrichten");
+                    s.ws.close();
+                } else {
+                    s.pending.push(text);
+                }
             }
         };
 
@@ -69,6 +109,7 @@
             const s = socks.get(id);
             if (!s) return;
             clearInterval(s.beat);
+            clearTimeout(s.timer);
             if (s.ws) { s.ws.onclose = null; s.ws.close(); }
             socks.delete(id);
         };

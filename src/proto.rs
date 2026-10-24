@@ -6,8 +6,8 @@
 use crate::xml::Element;
 use std::io::{self, BufRead};
 
-/// `Connector.versionNr`
-pub const VERSION: &str = "1.1.0.spika";
+/// Package release and wire-protocol revision, shared by native, browser and server builds.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/2");
 pub const MAX_FRAME: usize = 4096;
 pub const MAX_NAME_CHARS: usize = 20;
 pub const MAX_CHAT_CHARS: usize = 200;
@@ -46,6 +46,11 @@ pub struct Cmd {
 }
 
 impl Cmd {
+    pub fn valid(&self) -> bool {
+        (120..=600).contains(&self.x) && (40..=440).contains(&self.y)
+            && self.c.len() == 4 && self.c.bytes().all(|key| matches!(key, b'0' | b'1'))
+    }
+
     pub fn new(x: f64, y: f64, keys: [bool; 4]) -> Self {
         Self { x: x.round() as i32, y: y.round() as i32, c: keys.iter().map(|&k| if k { '1' } else { '0' }).collect() }
     }
@@ -108,6 +113,7 @@ pub enum Msg {
     Detonate { cmd: Cmd, cx: i32, cy: i32, id: i64 },
     Die { x: i32, y: i32 },
     // --- server -> client
+    ServerVersion(String),
     UserList(Vec<PlayerInfo>),
     PlayerUpdate(PlayerInfo),
     NewPlayer(PlayerInfo),
@@ -126,7 +132,7 @@ fn num(e: &Element, key: &str) -> Option<f64> {
 }
 
 fn int(e: &Element, key: &str) -> Option<i64> {
-    num(e, key).map(|v| v.round() as i64)
+    e.get(key)?.trim().parse().ok()
 }
 
 fn string(e: &Element, key: &str) -> Option<String> {
@@ -134,7 +140,7 @@ fn string(e: &Element, key: &str) -> Option<String> {
 }
 
 fn cmd(e: &Element) -> Option<Cmd> {
-    Some(Cmd { x: int(e, "x")? as i32, y: int(e, "y")? as i32, c: e.get("c")?.to_string() })
+    Some(Cmd { x: int(e, "x")?.try_into().ok()?, y: int(e, "y")?.try_into().ok()?, c: e.get("c")?.to_string() })
 }
 
 fn with_cmd(mut e: Element, c: &Cmd) -> Element {
@@ -151,6 +157,24 @@ fn info_el(name: &str, p: &PlayerInfo) -> Element {
 }
 
 impl Msg {
+    pub fn valid_gameplay(&self) -> bool {
+        use crate::grid::in_bounds;
+        let valid_cell = |cx: i32, cy: i32| in_bounds(cx, cy);
+        match self {
+            Msg::Move(cmd) => cmd.valid(),
+            Msg::Seed(seed) => (0..=20000).contains(seed),
+            Msg::Stats { ping, fps } => (0..=60000).contains(ping) && (0..=1000).contains(fps),
+            Msg::Bomb { cmd, cx, cy } | Msg::Detonate { cmd, cx, cy, .. } => cmd.valid() && valid_cell(*cx, *cy),
+            Msg::Pickup { cmd, cx, cy, speed, blast } => cmd.valid() && valid_cell(*cx, *cy)
+                && speed.is_finite() && (0.15..=0.19 + 1e-9).contains(speed) && (2..=8).contains(blast),
+            Msg::Kick { cmd, cx, cy, id, dx, dy, t } => cmd.valid() && valid_cell(*cx, *cy) && *id >= 0
+                && (0..=3500).contains(t) && ((dx.abs() == 0.1 && *dy == 0.0) || (dy.abs() == 0.1 && *dx == 0.0)),
+            Msg::Stop { cmd, cx, cy, id, t } => cmd.valid() && valid_cell(*cx, *cy) && *id >= 0 && (0..=3500).contains(t),
+            Msg::Die { x, y } => Cmd { x: *x, y: *y, c: "0000".into() }.valid(),
+            _ => false,
+        }
+    }
+
     /// Messages the server forwards unchanged to the opponent while a match is running.
     pub fn is_relay(&self) -> bool {
         matches!(
@@ -205,6 +229,7 @@ impl Msg {
             }
             Msg::Detonate { cmd, cx, cy, id } => with_cmd(el("10"), cmd).attr("i", id).attr("xp", cx).attr("yp", cy),
             Msg::Die { x, y } => el("die").attr("x", x).attr("y", y),
+            Msg::ServerVersion(version) => el("serverVersion").attr("version", version),
             Msg::UserList(list) => list.iter().fold(el("userList"), |e, p| e.child(info_el("user", p))),
             Msg::PlayerUpdate(p) => info_el("playerUpdate", p),
             Msg::NewPlayer(p) => info_el("newPlayer", p),
@@ -254,26 +279,27 @@ impl Msg {
             "12" => Msg::Move(cmd(e)?),
             "14" => Msg::Stats { ping: int(e, "p")?, fps: int(e, "f")? },
             "16" => Msg::Seed(int(e, "s")?),
-            "17" => Msg::Bomb { cmd: cmd(e)?, cx: int(e, "xp")? as i32, cy: int(e, "yp")? as i32 },
+            "17" => Msg::Bomb { cmd: cmd(e)?, cx: int(e, "xp")?.try_into().ok()?, cy: int(e, "yp")?.try_into().ok()? },
             "18" => Msg::Pickup {
                 cmd: cmd(e)?,
-                cx: int(e, "xp")? as i32,
-                cy: int(e, "yp")? as i32,
+                cx: int(e, "xp")?.try_into().ok()?,
+                cy: int(e, "yp")?.try_into().ok()?,
                 speed: num(e, "s")?,
-                blast: int(e, "b")?.clamp(0, 64) as u32,
+                blast: int(e, "b")?.try_into().ok()?,
             },
             "19" => Msg::Kick {
                 cmd: cmd(e)?,
-                cx: int(e, "xp")? as i32,
-                cy: int(e, "yp")? as i32,
+                cx: int(e, "xp")?.try_into().ok()?,
+                cy: int(e, "yp")?.try_into().ok()?,
                 id: int(e, "i")?,
                 dx: num(e, "dx")?,
                 dy: num(e, "dy")?,
                 t: int(e, "t")?,
             },
-            "11" => Msg::Stop { cmd: cmd(e)?, cx: int(e, "xp")? as i32, cy: int(e, "yp")? as i32, id: int(e, "i")?, t: int(e, "t")? },
-            "10" => Msg::Detonate { cmd: cmd(e)?, cx: int(e, "xp")? as i32, cy: int(e, "yp")? as i32, id: int(e, "i")? },
-            "die" => Msg::Die { x: int(e, "x")? as i32, y: int(e, "y")? as i32 },
+            "11" => Msg::Stop { cmd: cmd(e)?, cx: int(e, "xp")?.try_into().ok()?, cy: int(e, "yp")?.try_into().ok()?, id: int(e, "i")?, t: int(e, "t")? },
+            "10" => Msg::Detonate { cmd: cmd(e)?, cx: int(e, "xp")?.try_into().ok()?, cy: int(e, "yp")?.try_into().ok()?, id: int(e, "i")? },
+            "die" => Msg::Die { x: int(e, "x")?.try_into().ok()?, y: int(e, "y")?.try_into().ok()? },
+            "serverVersion" => Msg::ServerVersion(string(e, "version")?),
             "userList" => Msg::UserList(e.children.iter().filter_map(info).collect()),
             "playerUpdate" => Msg::PlayerUpdate(info(e)?),
             "newPlayer" => Msg::NewPlayer(info(e)?),
@@ -317,6 +343,20 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    #[test]
+    fn oversized_integer_fields_cannot_wrap_into_legal_gameplay() {
+        for xml in [
+            "<12 x=\"4294967416\" y=\"40\" c=\"0000\"/>",
+            "<17 x=\"120\" y=\"40\" c=\"0000\" xp=\"4294967296\" yp=\"0\"/>",
+            "<18 x=\"120\" y=\"40\" c=\"0000\" xp=\"0\" yp=\"0\" s=\"0.15\" b=\"4294967298\"/>",
+            "<16 seed=\"1e100\"/>",
+        ] {
+            assert!(Msg::from_xml(xml).is_none(), "{xml}");
+        }
+        assert!(!Msg::Seed(-1).valid_gameplay());
+        assert!(!Msg::Move(Cmd { x: 120, y: 40, c: "00000".into() }).valid_gameplay());
+    }
+
     fn cmd0() -> Cmd {
         Cmd::new(121.6, 40.2, [false, true, false, true])
     }
@@ -349,6 +389,7 @@ mod tests {
             Msg::Stop { cmd: cmd0(), cx: 5, cy: 4, id: 5000, t: 1500 },
             Msg::Detonate { cmd: cmd0(), cx: 5, cy: 4, id: 5000 },
             Msg::Die { x: 120, y: 40 },
+            Msg::ServerVersion(VERSION.into()),
             Msg::UserList(vec![p.clone(), PlayerInfo { name: "Bob".into(), skill: "0/0/0".into(), state: "3".into() }]),
             Msg::PlayerUpdate(p.clone()),
             Msg::NewPlayer(p),

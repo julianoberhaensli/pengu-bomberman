@@ -5,7 +5,7 @@ services:
     image: ${PENGU_IMAGE}
     restart: unless-stopped
     ports:
-      - "6900:6900"   # raw TCP for native clients; remove if only browsers are used
+      - "127.0.0.1:6900:6900"   # raw TCP is local-only; public browsers use Caddy's TLS endpoint
 
   caddy:
     image: caddy:2

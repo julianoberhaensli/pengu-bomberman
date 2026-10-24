@@ -44,7 +44,7 @@ Collect items from destroyed boxes: extra bomb, speed, bigger blast, and bomb ki
 
 ## Online play
 
-The original game talks to a server over an XML socket; its server is not available, so this repository contains a compatible one.
+The original game's server is not available, so this repository includes its own server based on the XML socket protocol, with additional validation and a version handshake.
 
 ```sh
 # one machine runs the server (default 0.0.0.0:6900)
@@ -56,7 +56,17 @@ cargo run --release -- --name Anna --server 192.168.0.10:6900 --online
 
 In the player room, pick a player with Up/Down or the mouse and press Enter (or click) to challenge him; clicking a player who challenged you accepts and starts the match (the one who accepts is player 1). `F2` challenges everybody, typing + Enter chats, `Esc` leaves. In a match use W A S D or the arrow keys and Space or Enter; `Esc` surrenders. After a match you can ask for a rematch or go back to the room.
 
-The server has no encryption and no passwords; use it only on networks you trust.
+Client and server must use exactly the same package version and wire-protocol revision. Both directions of the connection verify this before opening the lobby; older clients or servers are rejected. Rebuild and deploy the native client, browser WASM and server together. The shared version is defined in `src/proto.rs` from Cargo's package version plus a protocol revision. Bump the package version for releases and the protocol revision for incompatible wire changes. This is a compatibility check, not authentication of the executable.
+
+### Security and deployment
+
+- Connections are capped at 128 total and 32 per source IP, including unauthenticated connections. Authentication has a 10-second absolute deadline; later frames have a 45-second deadline. A connection may send at most 300 messages per second.
+- Outgoing queues hold at most 256 frames; slow recipients are disconnected. TCP writes time out after 2 seconds. Browser queues, frames and pending connection attempts are bounded too.
+- The server checks seeded board state, movement budgets, bomb capacity, actual item effects, kick permissions and bomb-control ownership before relaying gameplay. Remote kicked bombs also have a fuse fallback if their detonation message is lost.
+- Returning to the room or disconnecting during a match forfeits it. Rematches require a completed match and the other player's request.
+- Records are in memory only. At 10,000 retained names, inactive players' records are pruned on the next join.
+- Names are still unauthenticated, and deaths and some movement decisions remain client-reported. These checks do not make the game a fully authoritative competitive server or prevent every form of cheating.
+- Raw native TCP has no encryption or passwords: use it only on a trusted network or through a secure tunnel. For public browser play, use HTTPS/WSS through a TLS reverse proxy. The Docker Compose example binds raw TCP to loopback by default; explicitly change that binding only for a trusted network. Clients behind the same reverse proxy share its per-IP connection limit.
 
 ## Play in the browser (WebAssembly)
 

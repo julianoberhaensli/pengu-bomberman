@@ -9,6 +9,7 @@ use crate::player::*;
 pub const DT_MS: i64 = 25;
 /// `Bomb.TIME_TO_EXPLODE`
 pub const BOMB_FUSE_MS: i64 = 3500;
+pub const REMOTE_FUSE_GRACE_MS: i64 = 1500;
 /// `Bliz.TIME_TO_HIDE`
 pub const FLAME_MS: i64 = 500;
 
@@ -32,7 +33,7 @@ pub struct Bomb {
     pub old: Option<Cell>,
     /// `moveId`: assigned on the first kick, shared with the other client.
     pub id: Option<i64>,
-    /// Kicked or stopped by the remote player: its detonation is announced by the other client, not by the fuse.
+    /// Remote detonation is preferred, with a bounded fuse fallback if its announcement is lost.
     pub remote_kicked: bool,
 }
 
@@ -236,7 +237,7 @@ impl World {
         }
         let (x, y) = (self.players[pi].x, self.players[pi].y);
         let Some((cx, cy, cell)) = self.stone_at_px(x, y) else { return };
-        if !cell.is_item() {
+        if !cell.is_item() || !cell.open {
             return;
         }
         self.events.push(Event::PickUp);
@@ -407,7 +408,8 @@ impl World {
         if self.bombs[i].exploded {
             return;
         }
-        if self.now > BOMB_FUSE_MS + self.bombs[i].start && !self.bombs[i].remote_kicked {
+        let grace = if self.bombs[i].remote_kicked { REMOTE_FUSE_GRACE_MS } else { 0 };
+        if self.now > BOMB_FUSE_MS + self.bombs[i].start + grace {
             self.explode(i);
             return;
         }
@@ -542,32 +544,68 @@ impl World {
         self.bombs.iter().position(|b| !b.exploded && b.id == Some(id))
     }
 
-    /// Message 17: `Grid.setBomb` for the remote player (its `bombsSet` is not touched, like the original).
-    pub fn remote_place_bomb(&mut self, cx: i32, cy: i32, owner: usize) {
-        if in_bounds(cx, cy) {
-            self.events.push(Event::BombPlaced);
-            self.set_bomb(cx, cy, owner);
+    /// Message 17: validated bomb placement with shared capacity accounting.
+    pub fn remote_place_bomb(&mut self, cx: i32, cy: i32, owner: usize) -> bool {
+        if owner >= self.players.len() || !in_bounds(cx, cy) || self.players[owner].dead
+            || self.get_stone(cx, cy).kind != Kind::Free || self.bomb_index_at(cx, cy).is_some()
+            || self.players[owner].bombs_set >= self.players[owner].num_bombs {
+            return false;
         }
+        self.players[owner].bombs_set += 1;
+        self.events.push(Event::BombPlaced);
+        self.set_bomb(cx, cy, owner);
+        true
     }
 
     /// Message 18: the remote player took an item; its new speed and blast range are adopted.
-    pub fn remote_pickup(&mut self, cx: i32, cy: i32, owner: usize, speed: f64, blast: u32) {
-        self.players[owner].speed = speed;
-        self.players[owner].num_blast = blast;
-        self.events.push(Event::PickUp);
-        if in_bounds(cx, cy) && self.cells[cy as usize][cx as usize].is_item() {
-            self.cells[cy as usize][cx as usize] = Cell::FREE;
+    pub fn remote_pickup(&mut self, cx: i32, cy: i32, owner: usize, speed: f64, blast: u32) -> bool {
+        if owner >= self.players.len() || !in_bounds(cx, cy) || self.players[owner].dead {
+            return false;
         }
+        let cell = self.get_stone(cx, cy);
+        if !cell.is_item() || !cell.open {
+            return false;
+        }
+        let player = &self.players[owner];
+        let expected_speed = if cell.kind == Kind::ItemSpeed {
+            if player.speed < MAX_SPEED { player.speed + SPEED_STEP } else { MAX_SPEED }
+        } else { player.speed };
+        let expected_blast = player.num_blast + u32::from(cell.kind == Kind::ItemBlast);
+        if !speed.is_finite() || (speed - expected_speed).abs() > 1e-9 || blast != expected_blast {
+            return false;
+        }
+        let player = &mut self.players[owner];
+        player.speed = expected_speed;
+        player.num_blast = expected_blast;
+        if cell.kind == Kind::ItemBomb {
+            player.num_bombs += 1;
+        }
+        if cell.kind == Kind::ItemKick {
+            player.kick = true;
+        }
+        self.events.push(Event::PickUp);
+        self.cells[cy as usize][cx as usize] = Cell::FREE;
+        true
     }
 
     /// Message 19: `Bomb.remoteKick`.
-    pub fn remote_kick(&mut self, cx: i32, cy: i32, owner: usize, dx: f64, dy: f64, t: i64, id: i64) {
-        let Some(i) = self.bomb_index_at(cx, cy) else { return };
+    pub fn remote_kick(&mut self, cx: i32, cy: i32, owner: usize, dx: f64, dy: f64, t: i64, id: i64) -> bool {
+        if owner >= self.players.len() || !self.players[owner].kick || self.players[owner].dead
+            || !(0..=BOMB_FUSE_MS).contains(&t) || id < 0
+            || !((dx.abs() == KICK_SPEED && dy == 0.0) || (dy.abs() == KICK_SPEED && dx == 0.0)) {
+            return false;
+        }
+        let Some(i) = self.bomb_index_at(cx, cy) else { return false };
+        if self.bombs[i].kicked_by == Some(owner)
+            || self.bombs[i].id.is_some_and(|existing| existing != id)
+            || self.bomb_by_id(id).is_some_and(|existing| existing != i) {
+            return false;
+        }
         let now = self.now;
         let b = &mut self.bombs[i];
         b.kicked_by = Some(owner);
         b.remote_kicked = true;
-        b.start = now - BOMB_FUSE_MS + t;
+        b.start = b.start.min(now - BOMB_FUSE_MS + t);
         b.moving = true;
         b.kicked = true;
         b.dx = dx;
@@ -576,12 +614,13 @@ impl World {
             b.id = Some(id);
         }
         self.events.push(Event::Kick);
+        true
     }
 
     /// Message 11: `BombManager.remoteStopBomb`; the sender keeps responsibility for the detonation.
     pub fn remote_stop(&mut self, id: i64, cx: i32, cy: i32, t: i64) {
         let Some(i) = self.bomb_by_id(id) else { return };
-        if !in_bounds(cx, cy) {
+        if !in_bounds(cx, cy) || !(0..=BOMB_FUSE_MS).contains(&t) || !self.valid_bomb_destination(i, cx, cy) {
             return;
         }
         if (self.bombs[i].cx, self.bombs[i].cy) != (cx, cy) {
@@ -589,7 +628,7 @@ impl World {
         }
         let now = self.now;
         let b = &mut self.bombs[i];
-        b.start = now - BOMB_FUSE_MS + t;
+        b.start = b.start.min(now - BOMB_FUSE_MS + t);
         b.moving = false;
         b.remote_kicked = true;
         self.snap_bomb(i);
@@ -598,13 +637,30 @@ impl World {
     /// Message 10: `BombManager.remoteExplode`.
     pub fn remote_detonate(&mut self, id: i64, cx: i32, cy: i32) {
         let Some(i) = self.bomb_by_id(id) else { return };
-        if !in_bounds(cx, cy) {
+        if !in_bounds(cx, cy) || !self.valid_bomb_destination(i, cx, cy) {
             return;
         }
         if (self.bombs[i].cx, self.bombs[i].cy) != (cx, cy) {
             self.move_bomb_to(i, cx, cy);
         }
         self.explode(i);
+    }
+
+    fn valid_bomb_destination(&self, index: usize, cx: i32, cy: i32) -> bool {
+        let bomb = &self.bombs[index];
+        if (bomb.cx, bomb.cy) == (cx, cy) { return true; }
+        let distance = (bomb.cx - cx).abs() + (bomb.cy - cy).abs();
+        if distance > 4 || (bomb.cx != cx && bomb.cy != cy)
+            || (bomb.dx != 0.0 && bomb.cy != cy) || (bomb.dy != 0.0 && bomb.cx != cx) {
+            return false;
+        }
+        let step_x = (cx - bomb.cx).signum();
+        let step_y = (cy - bomb.cy).signum();
+        (1..=distance).all(|step| {
+            let x = bomb.cx + step_x * step;
+            let y = bomb.cy + step_y * step;
+            self.get_stone(x, y).can_enter() && self.bomb_index_at(x, y).is_none()
+        })
     }
 
     /// Message `die`: the remote player is dead, the game is locked (`Game.remotePlayerDie`).
@@ -654,6 +710,41 @@ mod tests {
 
     fn empty_world() -> World {
         World::with_cells(base_level())
+    }
+
+    #[test]
+    fn remote_pickups_require_a_real_open_item_and_exact_effects() {
+        let mut world = empty_world();
+        assert!(!world.remote_pickup(0, 0, 0, -999.0, 64));
+        world.cells[0][0] = Cell { kind: Kind::ItemSpeed, open: false };
+        assert!(!world.remote_pickup(0, 0, 0, 0.16, 2));
+        world.cells[0][0].open = true;
+        assert!(!world.remote_pickup(0, 0, 0, 0.18, 2));
+        assert!(!world.remote_pickup(0, 0, 0, f64::NAN, 2));
+        assert!(world.remote_pickup(0, 0, 0, 0.16, 2));
+        assert!(!world.remote_pickup(0, 0, 0, 0.17, 2));
+        assert_eq!(world.players[0].speed, 0.16);
+    }
+
+    #[test]
+    fn remote_kicks_cannot_extend_fuses_or_make_bombs_immortal() {
+        let mut world = empty_world();
+        world.local = Some(2);
+        assert!(world.remote_place_bomb(0, 0, 0));
+        assert!(!world.remote_place_bomb(0, 0, 0));
+        assert!(!world.remote_place_bomb(1, 0, 0));
+        assert!(!world.remote_kick(0, 0, 0, 0.1, 0.0, 3500, 5000));
+        world.players[0].kick = true;
+        assert!(!world.remote_kick(0, 0, 0, 999.0, 0.0, 3500, 5000));
+        assert!(!world.remote_kick(0, 0, 0, 0.1, 0.0, 999999, 5000));
+        assert!(world.remote_kick(0, 0, 0, 0.1, 0.0, 3500, 5000));
+        world.now = 1000;
+        world.remote_stop(5000, 0, 0, 3500);
+        assert_eq!(world.bombs[0].start, 0);
+        world.now = BOMB_FUSE_MS + REMOTE_FUSE_GRACE_MS + 1;
+        world.update_objects();
+        assert!(world.bombs.is_empty());
+        assert_eq!(world.players[0].bombs_set, 0);
     }
 
     fn hold(w: &mut World, pi: usize, d: Dir) {

@@ -162,6 +162,11 @@ impl Online {
                     if let Stage::Match(nm) = &mut self.stage {
                         nm.handle(m.clone(), wall_ms());
                     }
+                    if let (Stage::After(outcome), Msg::EndGame { winner }) = (&mut self.stage, &m) {
+                        *outcome = if winner.is_empty() { NetOutcome::Draw }
+                            else if winner == &self.lobby.my_name { NetOutcome::Win }
+                            else { NetOutcome::Lose };
+                    }
                     let r = self.lobby.handle(&m);
                     self.react(a, r);
                 }

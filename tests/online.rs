@@ -53,7 +53,7 @@ fn two_clients_meet_challenge_play_and_chat_over_tcp() {
     // player 1 sends the seed, both sides exchange moves
     anna.send(Msg::Seed(777));
     expect(&bob, "seed", |m| *m == Msg::Seed(777));
-    let mv = Msg::Move(Cmd { x: 160, y: 40, c: "0010".into() });
+    let mv = Msg::Move(Cmd { x: 560, y: 440, c: "0001".into() });
     bob.send(mv.clone());
     expect(&anna, "move", |m| *m == mv);
     bob.send(Msg::Ping);
@@ -94,6 +94,27 @@ fn duplicate_names_and_wrong_versions_are_refused() {
     assert!(matches!(Msg::from_xml(&frame), Some(Msg::ErrorMsg(_))), "{frame}");
     assert_eq!(read_frame(&mut r, 4096).unwrap(), None, "server closes after the error");
     srv.stop();
+}
+
+#[test]
+fn client_rejects_missing_and_mismatched_server_versions() {
+    use std::io::{BufReader, Write};
+    use std::net::TcpListener;
+    for greeting in [Msg::ServerVersion("old-release/1".into()), Msg::UserList(Vec::new())] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            assert!(read_frame(&mut BufReader::new(stream.try_clone().unwrap()), MAX_FRAME).unwrap().is_some());
+            stream.write_all(&greeting.to_frame()).unwrap();
+        });
+        let client = Connection::connect(&address, "Anna");
+        let (messages, reason) = until_closed(&client);
+        assert!(messages.is_empty());
+        assert!(reason.is_some_and(|reason| reason.contains("Spielversion")));
+        worker.join().unwrap();
+    }
 }
 
 #[test]

@@ -11,8 +11,13 @@ type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 
 fn ws_connect(addr: &str, name: &str) -> Ws {
     let (mut ws, _) = tungstenite::connect(format!("ws://{addr}")).unwrap();
+    if let MaybeTlsStream::Plain(socket) = ws.get_mut() {
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    }
     let auth = Msg::Auth { name: name.into(), version: VERSION.into(), hash: String::new() };
     ws.send(Message::text(auth.to_xml())).unwrap();
+    assert_eq!(ws_expect(&mut ws, "server version", |message| matches!(message, Msg::ServerVersion(_))),
+        Msg::ServerVersion(VERSION.into()));
     ws
 }
 
@@ -63,7 +68,9 @@ fn browser_and_native_players_share_one_room_and_play_each_other() {
     web.send(Message::text(Msg::StartGame("Nat".into()).to_xml())).unwrap();
     expect(&native, "startGame", |m| *m == Msg::StartGame("Webby".into()));
 
-    let mv = Msg::Move(Cmd { x: 160, y: 40, c: "0010".into() });
+    web.send(Message::text(Msg::Seed(777).to_xml())).unwrap();
+    expect(&native, "seed", |m| *m == Msg::Seed(777));
+    let mv = Msg::Move(Cmd { x: 560, y: 440, c: "0001".into() });
     native.send(mv.clone());
     ws_expect(&mut web, "move", |m| *m == mv);
     web.send(Message::text(Msg::Ping.to_xml())).unwrap();
@@ -86,5 +93,12 @@ fn websocket_clients_are_refused_like_tcp_clients() {
     let err = ws_expect(&mut dup, "error", |m| matches!(m, Msg::ErrorMsg(_)));
     assert!(matches!(err, Msg::ErrorMsg(t) if t.contains("vergeben")));
     assert!(matches!(dup.read(), Ok(Message::Close(_)) | Err(_)), "the server closes after the error");
+    let (mut old, _) = tungstenite::connect(format!("ws://{addr}")).unwrap();
+    if let MaybeTlsStream::Plain(socket) = old.get_mut() {
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    }
+    old.send(Message::text(Msg::Auth { name: "Old".into(), version: "old-release/1".into(), hash: String::new() }.to_xml())).unwrap();
+    assert!(matches!(ws_expect(&mut old, "version error", |message| matches!(message, Msg::ErrorMsg(_))),
+        Msg::ErrorMsg(reason) if reason.contains("Spielversion")));
     srv.stop();
 }
